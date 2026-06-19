@@ -1,0 +1,38 @@
+# ---- Credentials / Geheimnisse (NIEMALS committen) ----
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.*
+
+# ---- Datenbank: enthaelt OAuth-Tokens UND den Match-Cache ----
+*.db
+*.sqlite
+*.sqlite3
+sync.db
+
+# ---- Virtuelle Umgebung ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Python-Artefakte ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

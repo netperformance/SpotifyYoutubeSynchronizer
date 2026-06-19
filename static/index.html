@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spotify → YouTube Sync</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --tx:#e7e9ee; --mut:#9aa3b2;
+          --sp:#1db954; --yt:#ff0033; --ac:#5b8cff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--tx); }
+  .wrap { max-width:920px; margin:0 auto; padding:24px 18px 80px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--mut); margin:0 0 22px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .spacer { flex:1; }
+  button { background:var(--ac); color:#fff; border:0; border-radius:8px; padding:9px 14px;
+           font-weight:600; cursor:pointer; }
+  button.sp { background:var(--sp); } button.yt { background:var(--yt); }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--tx); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .pill { font-size:12px; padding:3px 9px; border-radius:99px; border:1px solid var(--line); color:var(--mut); }
+  .pill.on { color:#0f1115; background:var(--sp); border-color:var(--sp); font-weight:700; }
+  .pill.off { color:var(--mut); }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
+  th { color:var(--mut); font-weight:600; font-size:13px; }
+  td.num { color:var(--mut); width:46px; }
+  .opts { display:flex; gap:18px; align-items:center; flex-wrap:wrap; margin:12px 0; color:var(--mut); }
+  .opts label { color:var(--tx); }
+  input[type=range] { vertical-align:middle; }
+  pre { background:#0b0d11; border:1px solid var(--line); border-radius:8px; padding:12px;
+        white-space:pre-wrap; max-height:300px; overflow:auto; font-size:13px; }
+  .review { border:1px solid var(--yt); border-radius:8px; padding:10px 12px; margin-top:10px; }
+  .review b { color:var(--yt); }
+  a.link { color:var(--ac); }
+  .muted { color:var(--mut); font-size:13px; }
+  .qrow { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); }
+  .qrow:last-child { border-bottom:0; }
+  .qname { flex:1; }
+  .qstats { color:var(--mut); font-size:12px; white-space:nowrap; }
+  .badge { font-size:11px; font-weight:700; padding:2px 8px; border-radius:99px; text-transform:uppercase; letter-spacing:.3px; }
+  .b-queued  { background:#2a2f3a; color:#9aa3b2; }
+  .b-running { background:#1c3a66; color:#9cc4ff; }
+  .b-done    { background:#10301d; color:#5fe39a; }
+  .b-cancelled { background:#3a2a2a; color:#ff9a9a; }
+  .b-error   { background:#3a1f1f; color:#ff7a7a; }
+  .spin { width:14px; height:14px; border:2px solid #3a4250; border-top-color:#9cc4ff;
+          border-radius:50%; display:inline-block; animation:sp .8s linear infinite; vertical-align:-2px; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  .banner { display:flex; align-items:center; gap:10px; font-weight:600; }
+  button.danger { background:#b3331f; }
+  button.mini { padding:4px 9px; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Spotify → YouTube Sync</h1>
+  <p class="sub">Einseitige Synchronisation. Spotify ist die Quelle der Wahrheit – Änderungen auf YouTube fließen nie zurück.</p>
+
+  <div class="card">
+    <div class="row">
+      <span id="sp-pill" class="pill off">Spotify: nicht verbunden</span>
+      <button class="sp" id="sp-connect" onclick="location.href='/login/spotify'">Spotify verbinden</button>
+      <span id="yt-pill" class="pill off">YouTube: nicht verbunden</span>
+      <button class="yt" id="yt-connect" onclick="location.href='/login/youtube'">YouTube verbinden</button>
+      <span class="spacer"></span>
+      <span class="muted" id="quota">Quota: –</span>
+    </div>
+  </div>
+
+  <div class="card" id="pl-card" style="display:none">
+    <div class="row">
+      <button class="ghost" onclick="loadPlaylists()">Playlists neu laden</button>
+      <label class="muted"><input type="checkbox" id="all" onchange="toggleAll()"> alle auswählen</label>
+      <span class="spacer"></span>
+      <button id="sync-btn" onclick="startSync()" disabled>Auswahl synchronisieren</button>
+    </div>
+
+    <div class="opts">
+      <label><input type="checkbox" id="remove" checked> Extra-Videos auf YouTube entfernen (exakte Spiegelung)</label>
+      <label><input type="checkbox" id="ignore-uncertain"> Unsicher erkannte Lieder ignorieren</label>
+      <label>Mindest-Trefferqualität: <span id="conf-val">0.55</span>
+        <input type="range" id="conf" min="0.3" max="0.9" step="0.05" value="0.55" oninput="confVal()">
+      </label>
+      <button class="ghost mini" onclick="resetUncertain()">Unsichere neu suchen lassen</button>
+    </div>
+
+    <table>
+      <thead><tr><th></th><th>#</th><th>Name</th><th>Tracks</th></tr></thead>
+      <tbody id="pl-body"></tbody>
+    </table>
+  </div>
+
+  <div class="card" id="job-card" style="display:none">
+    <div class="row">
+      <span class="banner"><span id="job-spin" class="spin"></span><b id="job-state">Synchronisiere …</b></span>
+      <span class="muted" id="job-progress"></span>
+      <span class="spacer"></span>
+      <span class="muted" id="job-quota"></span>
+      <button class="danger mini" id="cancel-all" onclick="cancelAll()">Alles abbrechen</button>
+    </div>
+
+    <div id="queue" style="margin-top:12px"></div>
+
+    <div id="review-box"></div>
+
+    <details style="margin-top:12px">
+      <summary class="muted" style="cursor:pointer">Detailliertes Log anzeigen</summary>
+      <pre id="job-log"></pre>
+    </details>
+  </div>
+</div>
+
+<script>
+let playlists = [];
+
+async function refreshStatus() {
+  const s = await (await fetch('/api/status')).json();
+  setPill('sp', 'Spotify', s.spotify);
+  setPill('yt', 'YouTube', s.youtube);
+  document.getElementById('quota').textContent =
+    `Quota heute: ${s.quota_used_today} / ${s.quota_limit}`;
+  document.getElementById('sp-connect').style.display = s.spotify ? 'none' : '';
+  document.getElementById('yt-connect').style.display = s.youtube ? 'none' : '';
+  if (s.spotify) { document.getElementById('pl-card').style.display = ''; if (!playlists.length) loadPlaylists(); }
+  return s;
+}
+function setPill(id, label, on) {
+  const e = document.getElementById(id + '-pill');
+  e.textContent = `${label}: ${on ? 'verbunden' : 'nicht verbunden'}`;
+  e.className = 'pill ' + (on ? 'on' : 'off');
+}
+
+async function loadPlaylists() {
+  const r = await fetch('/api/playlists');
+  if (!r.ok) { alert('Spotify zuerst verbinden.'); return; }
+  playlists = await r.json();
+  const body = document.getElementById('pl-body');
+  body.innerHTML = '';
+  for (const p of playlists) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><input type="checkbox" class="pick" value="${p.id}" onchange="updateBtn()"></td>
+      <td class="num">${p.index}.</td><td>${escapeHtml(p.name)}</td><td class="muted">${p.tracks_total}</td>`;
+    body.appendChild(tr);
+  }
+  updateBtn();
+}
+
+function toggleAll() {
+  const on = document.getElementById('all').checked;
+  document.querySelectorAll('.pick').forEach(c => c.checked = on);
+  updateBtn();
+}
+function updateBtn() {
+  const sel = [...document.querySelectorAll('.pick:checked')];
+  const ytOn = document.getElementById('yt-pill').classList.contains('on');
+  document.getElementById('sync-btn').disabled = sel.length === 0 || !ytOn;
+}
+function confVal() {
+  document.getElementById('conf-val').textContent = document.getElementById('conf').value;
+}
+
+let currentJob = null;
+
+async function startSync() {
+  const picked = [...document.querySelectorAll('.pick:checked')];
+  const selected = picked.map(c => {
+    const p = playlists.find(x => x.id === c.value);
+    return { id: c.value, name: p ? p.name : c.value };
+  });
+  const body = { playlists: selected,
+                 remove_extras: document.getElementById('remove').checked,
+                 ignore_uncertain: document.getElementById('ignore-uncertain').checked,
+                 min_confidence: parseFloat(document.getElementById('conf').value) };
+  const r = await fetch('/api/sync', { method:'POST', headers:{'Content-Type':'application/json'},
+                                       body: JSON.stringify(body) });
+  if (!r.ok) { alert('Sync-Start fehlgeschlagen: ' + (await r.text())); return; }
+  const { job_id } = await r.json();
+  currentJob = job_id;
+  const card = document.getElementById('job-card');
+  card.style.display = '';
+  card.scrollIntoView({ behavior:'smooth', block:'start' });
+  poll(job_id);
+}
+
+async function resetUncertain() {
+  const r = await fetch('/api/reset-uncertain', { method:'POST' });
+  const { cleared } = await r.json();
+  alert(`${cleared} als unsicher gemerkte Lieder zurückgesetzt. Sie werden beim nächsten Sync neu gesucht (kostet Quota).`);
+}
+
+async function cancelAll() {
+  if (!currentJob) return;
+  await fetch(`/api/sync/${currentJob}/cancel`, { method:'POST',
+    headers:{'Content-Type':'application/json'}, body:'{}' });
+}
+async function cancelOne(playlistId) {
+  if (!currentJob) return;
+  await fetch(`/api/sync/${currentJob}/cancel`, { method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({ playlist_id: playlistId }) });
+}
+
+const BADGE = { queued:['b-queued','wartet'], running:['b-running','läuft'],
+                done:['b-done','fertig'], cancelled:['b-cancelled','abgebrochen'],
+                error:['b-error','fehler'] };
+
+async function poll(jobId) {
+  const j = await (await fetch('/api/sync/' + jobId)).json();
+
+  // Kopf
+  const running = j.state === 'running';
+  document.getElementById('job-spin').style.display = running ? '' : 'none';
+  const st = { running:'Synchronisiere im Hintergrund …', done:'✓ Fertig',
+               cancelled:'⏹ Abgebrochen', quota:'⚠ Tageskontingent erreicht',
+               error:'✗ Fehler' }[j.state] || j.state;
+  document.getElementById('job-state').textContent = st;
+  document.getElementById('cancel-all').style.display = running ? '' : 'none';
+  const total = j.queue.length;
+  const fertig = j.queue.filter(q => ['done','cancelled','error'].includes(q.status)).length;
+  document.getElementById('job-progress').textContent = `${fertig}/${total} Listen verarbeitet`;
+  document.getElementById('job-quota').textContent = `Quota heute: ${j.quota_used_today} / ${j.quota_limit}`;
+  document.getElementById('job-log').textContent = j.log.join('\n');
+
+  // Warteschlange
+  const q = document.getElementById('queue');
+  q.innerHTML = '';
+  for (const it of j.queue) {
+    const [cls, label] = BADGE[it.status] || ['b-queued', it.status];
+    const stats = (it.status === 'done' || it.status === 'cancelled')
+      ? `+${it.added} / -${it.removed} · ${it.review} zu prüfen${it.ignored ? ' · ' + it.ignored + ' ignoriert' : ''}`
+      : (it.status === 'running' ? `${it.cached + it.searched} Tracks bearbeitet` : '');
+    const canCancel = running && (it.status === 'queued' || it.status === 'running');
+    const row = document.createElement('div');
+    row.className = 'qrow';
+    row.innerHTML =
+      `<span class="badge ${cls}">${label}</span>
+       <span class="qname">${escapeHtml(it.name)}</span>
+       <span class="qstats">${stats}</span>` +
+      (canCancel ? `<button class="ghost mini" data-id="${it.spotify_id}">abbrechen</button>` : '');
+    if (canCancel) row.querySelector('button').onclick = () => cancelOne(it.spotify_id);
+    q.appendChild(row);
+  }
+
+  renderReview(j.needs_review);
+
+  if (running) setTimeout(() => poll(jobId), 1200);
+  else refreshStatus();
+}
+
+function renderReview(items) {
+  const box = document.getElementById('review-box');
+  if (!items || !items.length) { box.innerHTML = ''; return; }
+  let html = `<div class="review"><b>Manuelle Prüfung nötig (${items.length})</b>
+    <div class="muted">Diese Tracks wurden nicht sicher als Original erkannt und NICHT automatisch übernommen:</div><ul>`;
+  for (const it of items)
+    html += `<li>${escapeHtml(it.track)} <span class="muted">(beste Trefferqualität ${it.confidence})</span></li>`;
+  box.innerHTML = html + '</ul></div>';
+}
+
+function escapeHtml(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+refreshStatus();
+</script>
+</body>
+</html>
