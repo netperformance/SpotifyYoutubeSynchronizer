@@ -1,4 +1,5 @@
 """YouTube-Client: Google-OAuth + Data API v3 (Suche, Playlists, Items) mit Quota-Zaehlung."""
+import asyncio
 import time
 import urllib.parse
 
@@ -72,20 +73,50 @@ async def _token() -> str:
     return tok["access_token"]
 
 
-async def _request(method: str, path: str, cost: int, *, params=None, json=None) -> dict:
+def _classify_limit(r) -> str:
+    """Klassifiziert 403/429-Fehler anhand des Antwort-Bodys.
+    'quota' = Tageskontingent erschoepft (kein Retry sinnvoll),
+    'rate'  = kurzfristiges Ratenlimit (mit Wartezeit erneut versuchen),
+    'other' = anderer 403 (z.B. Berechtigung)."""
+    t = (r.text or "").lower()
+    if "dailylimitexceeded" in t or "quotaexceeded" in t:
+        return "quota"
+    if r.status_code == 429 or "ratelimitexceeded" in t or "userratelimitexceeded" in t:
+        return "rate"
+    return "other"
+
+
+async def _request(method: str, path: str, cost: int, *, params=None, json=None,
+                   max_retries: int = 4) -> dict:
     token = await _token()
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.request(method, f"{API}{path}", headers=headers, params=params, json=json)
-        if r.status_code == 401:
-            await _refresh()
-            headers["Authorization"] = f"Bearer {await _token()}"
+        for attempt in range(max_retries + 1):
             r = await c.request(method, f"{API}{path}", headers=headers, params=params, json=json)
-        db.add_quota(cost)
-        if r.status_code == 403 and "quota" in r.text.lower():
-            raise QuotaExceeded("YouTube-Tageskontingent erschoepft.")
-        r.raise_for_status()
-        return r.json() if r.text else {}
+
+            if r.status_code == 401:
+                await _refresh()
+                headers["Authorization"] = f"Bearer {await _token()}"
+                continue
+
+            if r.status_code in (403, 429):
+                kind = _classify_limit(r)
+                if kind == "quota":
+                    # Abgelehnte Anfragen kosten serverseitig keine Quota -> nicht mitzaehlen
+                    raise QuotaExceeded("YouTube-Tageskontingent erschoepft.")
+                if kind == "rate":
+                    if attempt < max_retries:
+                        await asyncio.sleep(2 ** attempt)  # 1, 2, 4, 8 Sekunden
+                        continue
+                    raise QuotaExceeded(
+                        "YouTube-Ratenlimit anhaltend erreicht (nach mehreren Wiederholungen gestoppt).")
+                # anderer 403 -> echter Fehler
+                r.raise_for_status()
+
+            db.add_quota(cost)
+            r.raise_for_status()
+            return r.json() if r.text else {}
+    raise QuotaExceeded("YouTube-Anfrage nach Wiederholungen fehlgeschlagen.")
 
 
 class QuotaExceeded(RuntimeError):

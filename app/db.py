@@ -134,8 +134,12 @@ def save_playlist_map(spotify_playlist_id: str, youtube_playlist_id: str) -> Non
 
 # ---------- Quota ----------
 def _pacific_day() -> str:
-    # YouTube-Quota resettet um Mitternacht Pacific. Naeherung: UTC-8.
-    now = datetime.now(timezone.utc) - timedelta(hours=8)
+    # YouTube-Quota resettet um Mitternacht Pacific (mit Sommerzeit).
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/Los_Angeles"))
+    except Exception:  # noqa: BLE001 - Fallback falls Zeitzonendaten fehlen
+        now = datetime.now(timezone.utc) - timedelta(hours=8)
     return now.strftime("%Y-%m-%d")
 
 

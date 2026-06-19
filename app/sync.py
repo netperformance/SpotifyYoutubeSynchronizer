@@ -73,10 +73,17 @@ async def run_sync(job_id: str, remove_extras: bool, min_confidence: float,
             job["state"] = "done"
             _log(job, "✓ Alle ausgewählten Listen verarbeitet.")
     except youtube.QuotaExceeded as e:
+        for it in job["queue"]:
+            if it["status"] == "running":
+                it["status"] = "stopped"
         job["state"] = "quota"
         job["error"] = str(e)
-        _log(job, f"⚠ {e} Cache bleibt erhalten – morgen weiterlaufen lassen.")
+        _log(job, f"⚠ {e} Cache bleibt erhalten – morgen erneut „Synchronisieren“ drücken, "
+                  f"erledigte Lieder werden übersprungen.")
     except Exception as e:  # noqa: BLE001
+        for it in job["queue"]:
+            if it["status"] == "running":
+                it["status"] = "error"
         job["state"] = "error"
         job["error"] = f"{type(e).__name__}: {e}"
         _log(job, f"✗ Fehler: {job['error']}")
