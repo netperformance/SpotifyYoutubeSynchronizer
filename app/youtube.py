@@ -17,6 +17,19 @@ COST_LIST = 1
 COST_WRITE = 50
 
 
+def _token_error_details(response) -> str:
+    try:
+        data = response.json()
+    except Exception:  # noqa: BLE001
+        data = {}
+    error = data.get("error")
+    description = data.get("error_description")
+    if error or description:
+        detail = ", ".join(part for part in [error, description] if part)
+        return f"{detail}"
+    return response.text or "unbekannter Fehler"
+
+
 def build_auth_url(state: str) -> str:
     params = {
         "client_id": config.GOOGLE_CLIENT_ID,
@@ -42,7 +55,11 @@ async def exchange_code(code: str) -> None:
             "grant_type": "authorization_code",
         })
         if r.status_code != 200:
-            raise RuntimeError(f"Google Token-Tausch fehlgeschlagen ({r.status_code}): {r.text}")
+            db.disconnect("youtube")
+            raise RuntimeError(
+                f"Google Token-Tausch fehlgeschlagen ({r.status_code}): "
+                f"{_token_error_details(r)}. Bitte erneut mit YouTube verbinden."
+            )
         t = r.json()
         db.save_token("youtube", t["access_token"], t.get("refresh_token"), t["expires_in"])
 
@@ -58,7 +75,12 @@ async def _refresh() -> None:
             "client_secret": config.GOOGLE_CLIENT_SECRET,
             "grant_type": "refresh_token",
         })
-        r.raise_for_status()
+        if r.status_code != 200:
+            db.disconnect("youtube")
+            raise RuntimeError(
+                f"Google Token-Refresh fehlgeschlagen ({r.status_code}): "
+                f"{_token_error_details(r)}. Bitte erneut mit YouTube verbinden."
+            )
         t = r.json()
         db.save_token("youtube", t["access_token"], t.get("refresh_token"), t["expires_in"])
 
