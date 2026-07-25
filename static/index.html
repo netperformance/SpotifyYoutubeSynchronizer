@@ -74,7 +74,6 @@
   <div class="card" id="pl-card" style="display:none">
     <div class="row">
       <button class="ghost" onclick="loadPlaylists()">Playlists neu laden</button>
-      <label class="muted"><input type="checkbox" id="all" onchange="toggleAll()"> alle auswählen</label>
       <span class="spacer"></span>
       <button id="sync-btn" onclick="startSync()" disabled>Auswahl synchronisieren</button>
     </div>
@@ -86,6 +85,10 @@
         <input type="range" id="conf" min="0.3" max="0.9" step="0.05" value="0.55" oninput="confVal()">
       </label>
       <button class="ghost mini" onclick="resetUncertain()">Unsichere neu suchen lassen</button>
+    </div>
+
+    <div class="row" style="margin-bottom:6px">
+      <label class="muted"><input type="checkbox" id="all" onchange="toggleAll()"> alle auswählen</label>
     </div>
 
     <table>
@@ -134,17 +137,29 @@ function setPill(id, label, on) {
   e.className = 'pill ' + (on ? 'on' : 'off');
 }
 
+const SETTINGS_KEY = 'syncSettings';
+function loadSettings() {
+  try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; }
+  catch { return {}; }
+}
+function saveSettings(patch) {
+  const s = loadSettings();
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...s, ...patch }));
+}
+
 async function loadPlaylists() {
   const r = await fetch('/api/playlists');
   if (!r.ok) { alert('Spotify zuerst verbinden.'); return; }
   playlists = await r.json();
   const body = document.getElementById('pl-body');
   body.innerHTML = '';
+  const savedSelection = new Set(loadSettings().selectedPlaylists || []);
   for (const p of playlists) {
     const tr = document.createElement('tr');
     tr.innerHTML = `<td><input type="checkbox" class="pick" value="${p.id}" onchange="updateBtn()"></td>
       <td class="num">${p.index}.</td><td>${escapeHtml(p.name)}</td><td class="muted">${p.tracks_total}</td>`;
     body.appendChild(tr);
+    if (savedSelection.has(p.id)) tr.querySelector('.pick').checked = true;
   }
   updateBtn();
 }
@@ -155,13 +170,17 @@ function toggleAll() {
   updateBtn();
 }
 function updateBtn() {
-  const sel = [...document.querySelectorAll('.pick:checked')];
+  const all = [...document.querySelectorAll('.pick')];
+  const sel = all.filter(c => c.checked);
   const ytOn = document.getElementById('yt-pill').classList.contains('on');
   document.getElementById('sync-btn').disabled = sel.length === 0 || !ytOn;
+  document.getElementById('all').checked = all.length > 0 && sel.length === all.length;
+  saveSettings({ selectedPlaylists: sel.map(c => c.value) });
 }
 function confVal() {
   const v = parseFloat(document.getElementById('conf').value);
   document.getElementById('conf-val').textContent = Math.round(v * 100) + '%';
+  saveSettings({ minConfidence: v });
 }
 
 let currentJob = null;
@@ -274,6 +293,8 @@ function renderReview(items) {
 
 function escapeHtml(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
+const savedConf = loadSettings().minConfidence;
+if (typeof savedConf === 'number') document.getElementById('conf').value = savedConf;
 confVal();
 refreshStatus();
 </script>
