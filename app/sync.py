@@ -23,7 +23,7 @@ def new_job(playlists: list[dict]) -> str:
         "queue": [
             {"spotify_id": p["id"], "name": p.get("name") or p["id"],
              "status": "queued", "added": 0, "removed": 0,
-             "cached": 0, "searched": 0, "review": 0, "ignored": 0}
+             "cached": 0, "searched": 0, "review": 0, "ignored": 0, "error": None}
             for p in playlists
         ],
     }
@@ -51,6 +51,12 @@ def _log(job: dict, msg: str) -> None:
     job["log"].append(msg)
 
 
+def _friendly_message(e: Exception) -> str:
+    if isinstance(e, youtube.YouTubeApiError):
+        return str(e)
+    return f"Unerwarteter Fehler ({type(e).__name__}): {e}"
+
+
 async def run_sync(job_id: str, remove_extras: bool, min_confidence: float,
                    ignore_uncertain: bool = False) -> None:
     job = JOBS[job_id]
@@ -64,11 +70,30 @@ async def run_sync(job_id: str, remove_extras: bool, min_confidence: float,
                 item["status"] = "cancelled"
                 _log(job, f"⏹ „{item['name']}“ übersprungen (abgebrochen).")
                 continue
-            await _sync_one(job, job_id, item, remove_extras, min_confidence, ignore_uncertain)
+            try:
+                await _sync_one(job, job_id, item, remove_extras, min_confidence, ignore_uncertain)
+            except youtube.QuotaExceeded:
+                # Tageskontingent betrifft den ganzen Job, nicht nur diese Playlist -> abbrechen.
+                raise
+            except Exception as e:  # noqa: BLE001
+                # Fehler bei genau dieser Playlist isolieren, Rest der Warteschlange läuft weiter.
+                message = _friendly_message(e)
+                item["status"] = "error"
+                item["error"] = message
+                job["failed_any"] = True
+                _log(job, f"  ✗ „{item['name']}“ fehlgeschlagen: {message}")
 
         if CANCEL.get(job_id, {}).get("all"):
             job["state"] = "cancelled"
             _log(job, "⏹ Gesamter Sync abgebrochen.")
+        elif job.get("failed_any"):
+            failed_names = [it["name"] for it in job["queue"] if it["status"] == "error"]
+            job["state"] = "error"
+            job["error"] = ("Fehlgeschlagen: " + ", ".join(failed_names) +
+                            ". Alle anderen ausgewählten Listen wurden verarbeitet. "
+                            "Mit „Fehlgeschlagene erneut versuchen“ nur diese wiederholen.")
+            _log(job, f"✗ {len(failed_names)} von {len(job['queue'])} Playlisten fehlgeschlagen, "
+                      f"Rest wurde erfolgreich verarbeitet.")
         else:
             job["state"] = "done"
             _log(job, "✓ Alle ausgewählten Listen verarbeitet.")
@@ -85,7 +110,7 @@ async def run_sync(job_id: str, remove_extras: bool, min_confidence: float,
             if it["status"] == "running":
                 it["status"] = "error"
         job["state"] = "error"
-        job["error"] = f"{type(e).__name__}: {e}"
+        job["error"] = _friendly_message(e)
         _log(job, f"✗ Fehler: {job['error']}")
     finally:
         job["quota_used_today"] = db.quota_used_today()

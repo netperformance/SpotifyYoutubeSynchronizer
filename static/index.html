@@ -103,6 +103,7 @@
       <span class="muted" id="job-progress"></span>
       <span class="spacer"></span>
       <span class="muted" id="job-quota"></span>
+      <button class="ghost mini" id="retry-btn" style="display:none" onclick="retryFailed()">Fehlgeschlagene erneut versuchen</button>
       <button class="danger mini" id="cancel-all" onclick="cancelAll()">Alles abbrechen</button>
     </div>
 
@@ -184,13 +185,10 @@ function confVal() {
 }
 
 let currentJob = null;
+let lastQueue = [];
 
-async function startSync() {
-  const picked = [...document.querySelectorAll('.pick:checked')];
-  const selected = picked.map(c => {
-    const p = playlists.find(x => x.id === c.value);
-    return { id: c.value, name: p ? p.name : c.value };
-  });
+async function submitSync(selected) {
+  if (!selected.length) return;
   const body = { playlists: selected,
                  remove_extras: document.getElementById('remove').checked,
                  ignore_uncertain: document.getElementById('ignore-uncertain').checked,
@@ -200,10 +198,26 @@ async function startSync() {
   if (!r.ok) { alert('Sync-Start fehlgeschlagen: ' + (await r.text())); return; }
   const { job_id } = await r.json();
   currentJob = job_id;
+  document.getElementById('retry-btn').style.display = 'none';
   const card = document.getElementById('job-card');
   card.style.display = '';
   card.scrollIntoView({ behavior:'smooth', block:'start' });
   poll(job_id);
+}
+
+async function startSync() {
+  const picked = [...document.querySelectorAll('.pick:checked')];
+  const selected = picked.map(c => {
+    const p = playlists.find(x => x.id === c.value);
+    return { id: c.value, name: p ? p.name : c.value };
+  });
+  submitSync(selected);
+}
+
+async function retryFailed() {
+  const failed = lastQueue.filter(it => it.status === 'error')
+    .map(it => ({ id: it.spotify_id, name: it.name }));
+  submitSync(failed);
 }
 
 async function resetUncertain() {
@@ -234,6 +248,7 @@ async function poll(jobId) {
     document.getElementById('job-state').textContent =
       'Kein laufender Job mehr (Server wurde neu gestartet). Starte den Sync neu.';
     document.getElementById('cancel-all').style.display = 'none';
+    document.getElementById('retry-btn').style.display = 'none';
     document.getElementById('queue').innerHTML = '';
     currentJob = null;
     refreshStatus();
@@ -255,6 +270,10 @@ async function poll(jobId) {
   document.getElementById('job-quota').textContent = `Quota heute (geschätzt): ${j.quota_used_today} / ${j.quota_limit}`;
   document.getElementById('job-log').textContent = j.log.join('\n');
 
+  lastQueue = j.queue;
+  const hasErrors = j.queue.some(it => it.status === 'error');
+  document.getElementById('retry-btn').style.display = (!running && hasErrors) ? '' : 'none';
+
   // Warteschlange
   const q = document.getElementById('queue');
   q.innerHTML = '';
@@ -262,14 +281,15 @@ async function poll(jobId) {
     const [cls, label] = BADGE[it.status] || ['b-queued', it.status];
     const stats = (it.status === 'done' || it.status === 'cancelled')
       ? `+${it.added} / -${it.removed} · ${it.review} zu prüfen${it.ignored ? ' · ' + it.ignored + ' ignoriert' : ''}`
-      : (it.status === 'running' ? `${it.cached + it.searched} Tracks bearbeitet` : '');
+      : (it.status === 'running' ? `${it.cached + it.searched} Tracks bearbeitet`
+      : (it.status === 'error' ? (it.error || 'Fehler') : ''));
     const canCancel = running && (it.status === 'queued' || it.status === 'running');
     const row = document.createElement('div');
     row.className = 'qrow';
     row.innerHTML =
       `<span class="badge ${cls}">${label}</span>
        <span class="qname">${escapeHtml(it.name)}</span>
-       <span class="qstats">${stats}</span>` +
+       <span class="qstats">${escapeHtml(stats)}</span>` +
       (canCancel ? `<button class="ghost mini" data-id="${it.spotify_id}">abbrechen</button>` : '');
     if (canCancel) row.querySelector('button').onclick = () => cancelOne(it.spotify_id);
     q.appendChild(row);

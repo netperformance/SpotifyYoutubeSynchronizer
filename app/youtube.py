@@ -108,13 +108,36 @@ def _classify_limit(r) -> str:
     return "other"
 
 
+# Status-Codes, die typischerweise kurzlebig/transient sind (Server-Konflikt,
+# ueberlastete Backends) und bei denen ein erneuter Versuch sinnvoll ist.
+# 409 tritt bei playlistItems oft durch kurzzeitige Nebenlaeufigkeit auf.
+_TRANSIENT_STATUS = {409, 500, 502, 503, 504}
+
+
+def _friendly_error(r) -> str:
+    try:
+        data = r.json()
+        err = data.get("error", {})
+        message = err.get("message") or (err.get("errors") or [{}])[0].get("reason", "")
+    except Exception:  # noqa: BLE001
+        message = ""
+    detail = message or (r.text or "")[:200] or "unbekannter Fehler"
+    return f"YouTube-Anfrage fehlgeschlagen ({r.status_code}): {detail}"
+
+
 async def _request(method: str, path: str, cost: int, *, params=None, json=None,
                    max_retries: int = 4) -> dict:
     token = await _token()
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=30) as c:
         for attempt in range(max_retries + 1):
-            r = await c.request(method, f"{API}{path}", headers=headers, params=params, json=json)
+            try:
+                r = await c.request(method, f"{API}{path}", headers=headers, params=params, json=json)
+            except httpx.TransportError as e:
+                if attempt < max_retries:
+                    await asyncio.sleep(2 ** attempt)  # 1, 2, 4, 8 Sekunden
+                    continue
+                raise YouTubeApiError(f"YouTube nicht erreichbar: {e}") from e
 
             if r.status_code == 401:
                 await _refresh()
@@ -133,16 +156,33 @@ async def _request(method: str, path: str, cost: int, *, params=None, json=None,
                     raise QuotaExceeded(
                         "YouTube-Ratenlimit anhaltend erreicht (nach mehreren Wiederholungen gestoppt).")
                 # anderer 403 -> echter Fehler
-                r.raise_for_status()
+                db.add_quota(cost)
+                raise YouTubeApiError(_friendly_error(r), r.status_code)
+
+            if r.status_code in _TRANSIENT_STATUS:
+                # Kurzlebiger Konflikt/Backend-Fehler -> mit Backoff erneut versuchen
+                if attempt < max_retries:
+                    await asyncio.sleep(2 ** attempt)  # 1, 2, 4, 8 Sekunden
+                    continue
+                db.add_quota(cost)
+                raise YouTubeApiError(_friendly_error(r), r.status_code)
 
             db.add_quota(cost)
-            r.raise_for_status()
+            if r.status_code >= 400:
+                raise YouTubeApiError(_friendly_error(r), r.status_code)
             return r.json() if r.text else {}
-    raise QuotaExceeded("YouTube-Anfrage nach Wiederholungen fehlgeschlagen.")
+    raise YouTubeApiError("YouTube-Anfrage nach mehreren Wiederholungen fehlgeschlagen.")
 
 
 class QuotaExceeded(RuntimeError):
     pass
+
+
+class YouTubeApiError(RuntimeError):
+    """Fehlgeschlagene YouTube-API-Anfrage mit lesbarer Meldung und Status-Code."""
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 # ---------- Suche / Matching-Daten ----------
@@ -231,11 +271,24 @@ async def playlist_items(youtube_playlist_id: str) -> list[dict]:
 
 
 async def add_to_playlist(youtube_playlist_id: str, video_id: str) -> None:
-    await _request("POST", "/playlistItems", COST_WRITE,
-                   params={"part": "snippet"},
-                   json={"snippet": {"playlistId": youtube_playlist_id,
-                                     "resourceId": {"kind": "youtube#video", "videoId": video_id}}})
+    try:
+        await _request("POST", "/playlistItems", COST_WRITE,
+                       params={"part": "snippet"},
+                       json={"snippet": {"playlistId": youtube_playlist_id,
+                                         "resourceId": {"kind": "youtube#video", "videoId": video_id}}})
+    except YouTubeApiError as e:
+        if e.status_code == 409:
+            # Trotz Wiederholungen weiter im Konflikt -> Video ist vermutlich bereits
+            # in der Playlist (Wettlauf mit einem parallelen Versuch). Kein harter Fehler.
+            return
+        raise
 
 
 async def remove_item(playlist_item_id: str) -> None:
-    await _request("DELETE", "/playlistItems", COST_WRITE, params={"id": playlist_item_id})
+    try:
+        await _request("DELETE", "/playlistItems", COST_WRITE, params={"id": playlist_item_id})
+    except YouTubeApiError as e:
+        if e.status_code in (404, 409):
+            # Eintrag ist bereits nicht mehr vorhanden -> Ziel ohnehin erreicht.
+            return
+        raise
