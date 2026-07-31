@@ -118,6 +118,60 @@ def reset_uncertain():
     return {"ok": True, "cleared": n}
 
 
+@app.get("/api/review")
+async def review():
+    """Nicht sicher erkannte Lieder je bereits synchronisierter Playlist,
+    aus dem lokalen Match-Cache - kostet keine YouTube-Quota."""
+    if not db.is_connected("spotify"):
+        raise HTTPException(401, "Spotify nicht verbunden.")
+    synced_ids = db.mapped_playlist_ids()
+    if not synced_ids:
+        return []
+    all_playlists = await spotify.list_playlists()
+    result = []
+    for p in all_playlists:
+        if p["id"] not in synced_ids:
+            continue
+        tracks = await spotify.get_playlist_tracks(p["id"])
+        missing = []
+        for tr in tracks:
+            cached = db.get_cached_match(tr["id"])
+            if cached and cached["status"] == "uncertain":
+                missing.append({
+                    "spotify_track_id": tr["id"],
+                    "track": tr["name"],
+                    "artist": tr["artist"],
+                    "confidence": round(cached["confidence"] or 0.0, 2),
+                    "best_guess_video_id": cached["youtube_video_id"] or None,
+                })
+        if missing:
+            result.append({"playlist_id": p["id"], "playlist_name": p["name"], "missing": missing})
+    return result
+
+
+@app.post("/api/recheck-track")
+async def recheck_track(req: Request):
+    """Sucht einen einzelnen Song gezielt neu bei YouTube (ignoriert den Cache) -
+    fuer die 'Fehlende Lieder'-Seite, z.B. nachdem sich das Matching verbessert hat.
+    Kostet YouTube-Quota (eine Suche)."""
+    if not (db.is_connected("spotify") and db.is_connected("youtube")):
+        raise HTTPException(401, "Beide Dienste muessen verbunden sein.")
+    body = await req.json()
+    spotify_track_id = body.get("spotify_track_id")
+    if not spotify_track_id:
+        raise HTTPException(400, "spotify_track_id fehlt.")
+    min_conf = float(body.get("min_confidence", 0.55))
+    try:
+        result = await sync.recheck_track(spotify_track_id, min_conf)
+    except youtube.QuotaExceeded as e:
+        raise HTTPException(429, str(e))
+    except youtube.YouTubeApiError as e:
+        raise HTTPException(502, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Song konnte nicht neu geprueft werden: {e}")
+    return result
+
+
 @app.post("/api/sync/{job_id}/cancel")
 async def cancel_sync(job_id: str, req: Request):
     body = {}
@@ -143,6 +197,11 @@ def sync_status(job_id: str):
 @app.get("/")
 def index():
     return FileResponse(STATIC / "index.html")
+
+
+@app.get("/review")
+def review_page():
+    return FileResponse(STATIC / "review.html")
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

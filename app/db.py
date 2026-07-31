@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS track_map (
     title            TEXT,
     confidence       REAL,
     status           TEXT DEFAULT 'ok',   -- 'ok' = sicherer Treffer, 'uncertain' = gesucht, kein sicherer Treffer
-    matched_at       INTEGER
+    matched_at       INTEGER,
+    algo_version     INTEGER DEFAULT 0    -- Version der Matching-Logik beim letzten Suchen
 );
 
 CREATE TABLE IF NOT EXISTS playlist_map (
@@ -49,10 +50,12 @@ def _conn():
 def init() -> None:
     with _conn() as con:
         con.executescript(_SCHEMA)
-        # Migration: status-Spalte zu bestehenden track_map-Tabellen ergaenzen
+        # Migration: Spalten zu bestehenden track_map-Tabellen ergaenzen
         cols = [r["name"] for r in con.execute("PRAGMA table_info(track_map)").fetchall()]
         if "status" not in cols:
             con.execute("ALTER TABLE track_map ADD COLUMN status TEXT DEFAULT 'ok'")
+        if "algo_version" not in cols:
+            con.execute("ALTER TABLE track_map ADD COLUMN algo_version INTEGER DEFAULT 0")
 
 
 # ---------- Tokens ----------
@@ -95,14 +98,15 @@ def get_cached_match(spotify_track_id: str) -> sqlite3.Row | None:
 
 
 def save_match(spotify_track_id: str, youtube_video_id: str, title: str,
-               confidence: float, status: str = "ok") -> None:
+               confidence: float, status: str = "ok", algo_version: int = 0) -> None:
     with _conn() as con:
         con.execute(
-            "INSERT INTO track_map(spotify_track_id, youtube_video_id, title, confidence, status, matched_at) "
-            "VALUES(?,?,?,?,?,?) ON CONFLICT(spotify_track_id) DO UPDATE SET "
+            "INSERT INTO track_map(spotify_track_id, youtube_video_id, title, confidence, status, matched_at, algo_version) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(spotify_track_id) DO UPDATE SET "
             "youtube_video_id=excluded.youtube_video_id, title=excluded.title, "
-            "confidence=excluded.confidence, status=excluded.status, matched_at=excluded.matched_at",
-            (spotify_track_id, youtube_video_id, title, confidence, status, int(time.time())),
+            "confidence=excluded.confidence, status=excluded.status, matched_at=excluded.matched_at, "
+            "algo_version=excluded.algo_version",
+            (spotify_track_id, youtube_video_id, title, confidence, status, int(time.time()), algo_version),
         )
 
 
@@ -130,6 +134,13 @@ def save_playlist_map(spotify_playlist_id: str, youtube_playlist_id: str) -> Non
             "ON CONFLICT(spotify_playlist_id) DO UPDATE SET youtube_playlist_id=excluded.youtube_playlist_id",
             (spotify_playlist_id, youtube_playlist_id),
         )
+
+
+def mapped_playlist_ids() -> set[str]:
+    """Spotify-Playlist-IDs, die schon mindestens einmal synchronisiert wurden."""
+    with _conn() as con:
+        rows = con.execute("SELECT spotify_playlist_id FROM playlist_map").fetchall()
+        return {r["spotify_playlist_id"] for r in rows}
 
 
 # ---------- Quota ----------

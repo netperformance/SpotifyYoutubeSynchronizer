@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fehlende Lieder – Spotify → YouTube Sync</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>Spotify → YouTube Sync</h1>
+  <p class="sub">Lieder, die die App bei einer Synchronisation nicht sicher zuordnen konnte und deshalb nicht in deine YouTube-Playlisten übernommen hat.</p>
+
+  <nav class="tabs">
+    <a href="/">Sync</a>
+    <a href="/review" class="active">Fehlende Lieder</a>
+  </nav>
+
+  <div class="card">
+    <div class="row">
+      <span class="muted" id="summary">Lade …</span>
+      <span class="spacer"></span>
+      <button class="ghost" onclick="load()">Aktualisieren</button>
+    </div>
+  </div>
+
+  <div id="groups"></div>
+</div>
+
+<script>
+function escapeHtml(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+function ytSearchUrl(artist, track) {
+  return 'https://www.youtube.com/results?search_query=' + encodeURIComponent(`${artist} ${track}`);
+}
+function ytWatchUrl(videoId) {
+  return 'https://www.youtube.com/watch?v=' + encodeURIComponent(videoId);
+}
+
+async function load() {
+  const summary = document.getElementById('summary');
+  const groups = document.getElementById('groups');
+  summary.textContent = 'Lade …';
+  groups.innerHTML = '';
+
+  const s = await (await fetch('/api/status')).json();
+  if (!s.spotify) {
+    summary.textContent = 'Spotify ist nicht verbunden.';
+    groups.innerHTML = `<div class="card muted">Bitte zuerst auf der <a class="link" href="/">Sync-Seite</a> Spotify verbinden.</div>`;
+    return;
+  }
+
+  const r = await fetch('/api/review');
+  if (!r.ok) {
+    summary.textContent = 'Konnte nicht geladen werden.';
+    return;
+  }
+  const data = await r.json();
+
+  if (!data.length) {
+    summary.textContent = 'Keine fehlenden Lieder.';
+    groups.innerHTML = `<div class="card muted">Entweder wurde noch keine Playlist synchronisiert, oder alle Lieder wurden erfolgreich zugeordnet. 🎉</div>`;
+    return;
+  }
+
+  const total = data.reduce((n, g) => n + g.missing.length, 0);
+  summary.textContent = `${total} fehlende Lieder in ${data.length} Playlist(en)`;
+
+  for (const g of data) {
+    const card = document.createElement('div');
+    card.className = 'card pl-group';
+    const heading = document.createElement('h3');
+    heading.innerHTML = `${escapeHtml(g.playlist_name)} <span class="muted count">(${g.missing.length})</span>`;
+    card.appendChild(heading);
+    for (const m of g.missing) {
+      card.appendChild(buildRow(m, heading));
+    }
+    groups.appendChild(card);
+  }
+}
+
+function minConfidence() {
+  try {
+    const s = JSON.parse(localStorage.getItem('syncSettings')) || {};
+    return typeof s.minConfidence === 'number' ? s.minConfidence : 0.55;
+  } catch { return 0.55; }
+}
+
+function buildRow(m, heading) {
+  const row = document.createElement('div');
+  row.className = 'miss-row';
+
+  const nameEl = document.createElement('span');
+  nameEl.className = 'miss-name';
+  nameEl.textContent = (m.artist || m.track) ? `${m.artist} – ${m.track}` : 'Unbekannter Titel (von Spotify ohne Namen geliefert)';
+
+  const confEl = document.createElement('span');
+  confEl.className = 'miss-conf';
+  confEl.textContent = `${Math.round((m.confidence || 0) * 100)}% Trefferqualität`;
+
+  const linksEl = document.createElement('span');
+  linksEl.className = 'miss-links';
+  if (m.artist || m.track) {
+    const a = document.createElement('a');
+    a.className = 'link'; a.target = '_blank'; a.rel = 'noopener';
+    a.href = ytSearchUrl(m.artist, m.track);
+    a.textContent = 'auf YouTube suchen';
+    linksEl.appendChild(a);
+  }
+  const candLink = document.createElement('a');
+  candLink.className = 'link'; candLink.target = '_blank'; candLink.rel = 'noopener';
+  candLink.textContent = 'bester Kandidat';
+  candLink.style.display = m.best_guess_video_id ? '' : 'none';
+  if (m.best_guess_video_id) candLink.href = ytWatchUrl(m.best_guess_video_id);
+  linksEl.appendChild(candLink);
+
+  const recheckBtn = document.createElement('button');
+  recheckBtn.className = 'ghost mini';
+  recheckBtn.textContent = 'Neu prüfen';
+  recheckBtn.title = 'Sucht diesen einen Song erneut bei YouTube (kostet etwas Quota)';
+  recheckBtn.onclick = async () => {
+    if (!m.spotify_track_id) return;
+    recheckBtn.disabled = true;
+    recheckBtn.textContent = 'Prüfe …';
+    try {
+      const r = await fetch('/api/recheck-track', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ spotify_track_id: m.spotify_track_id, min_confidence: minConfidence() }),
+      });
+      if (!r.ok) { alert('Neu-Prüfung fehlgeschlagen: ' + (await r.text())); recheckBtn.disabled = false; recheckBtn.textContent = 'Neu prüfen'; return; }
+      const res = await r.json();
+      if (res.certain) {
+        row.remove();
+        const countEl = heading.querySelector('.count');
+        const n = Math.max(0, parseInt(countEl.textContent.replace(/\D/g, ''), 10) - 1);
+        countEl.textContent = `(${n})`;
+        const summary = document.getElementById('summary');
+        const m2 = summary.textContent.match(/^(\d+)/);
+        if (m2) summary.textContent = summary.textContent.replace(/^\d+/, Math.max(0, parseInt(m2[1], 10) - 1));
+        if (n === 0) heading.closest('.pl-group').remove();
+      } else {
+        confEl.textContent = `${Math.round((res.confidence || 0) * 100)}% Trefferqualität`;
+        candLink.style.display = res.video_id ? '' : 'none';
+        if (res.video_id) candLink.href = ytWatchUrl(res.video_id);
+        recheckBtn.disabled = false;
+        recheckBtn.textContent = 'Neu prüfen';
+      }
+    } catch (e) {
+      alert('Neu-Prüfung fehlgeschlagen: ' + e);
+      recheckBtn.disabled = false;
+      recheckBtn.textContent = 'Neu prüfen';
+    }
+  };
+  linksEl.appendChild(recheckBtn);
+
+  row.appendChild(nameEl);
+  row.appendChild(confEl);
+  row.appendChild(linksEl);
+  return row;
+}
+
+load();
+</script>
+</body>
+</html>

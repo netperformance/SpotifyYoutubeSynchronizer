@@ -112,11 +112,28 @@ async def get_playlist_name(spotify_playlist_id: str) -> str:
     return data.get("name", "Playlist")
 
 
+async def get_track(spotify_track_id: str) -> dict:
+    """Einzelner Track (fuer gezieltes Neu-Pruefen einzelner Songs)."""
+    data = await _get(
+        f"/tracks/{spotify_track_id}",
+        {"fields": "id,name,duration_ms,explicit,artists(name)"},
+    )
+    artists = [a["name"] for a in data.get("artists", []) if a.get("name")]
+    return {
+        "id": data["id"],
+        "name": data.get("name", ""),
+        "artists": artists,
+        "artist": artists[0] if artists else "",
+        "duration_ms": data.get("duration_ms", 0),
+        "explicit": bool(data.get("explicit", False)),
+    }
+
+
 async def get_playlist_tracks(spotify_playlist_id: str) -> list[dict]:
     """Tracks einer Playlist. Liefert Name, Hauptkuenstler, alle Kuenstler, Dauer."""
     out: list[dict] = []
     offset = 0
-    fields = "items(track(id,name,duration_ms,is_local,artists(name))),next"
+    fields = "items(track(id,name,duration_ms,is_local,explicit,artists(name))),next"
     while True:
         data = await _get(
             f"/playlists/{spotify_playlist_id}/tracks",
@@ -133,6 +150,7 @@ async def get_playlist_tracks(spotify_playlist_id: str) -> list[dict]:
                 "artists": artists,
                 "artist": artists[0] if artists else "",
                 "duration_ms": tr.get("duration_ms", 0),
+                "explicit": bool(tr.get("explicit", False)),
             })
         if data.get("next"):
             offset += 100

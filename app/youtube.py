@@ -186,13 +186,17 @@ class YouTubeApiError(RuntimeError):
 
 
 # ---------- Suche / Matching-Daten ----------
-async def search_videos(query: str, max_results: int = 6) -> list[dict]:
-    """search.list -> Kandidaten (id, title, channel). Kostet 100 Einheiten."""
+async def search_videos(query: str, max_results: int = 12) -> list[dict]:
+    """search.list -> Kandidaten (id, title, channel). Kostet 100 Einheiten
+    (fix pro Aufruf, unabhaengig von max_results - mehr Kandidaten sind also gratis).
+    Kein videoCategoryId-Filter mehr: bei kleinen/regionalen Kanaelen (Weltmusik,
+    Nischengenres) ist die Kategorie-Zuordnung oft unzuverlaessig gepflegt und
+    haette sonst passende Original-Audios stillschweigend ausgeschlossen -
+    die Bewertung in matching.py filtert Nicht-Musik-Treffer zuverlaessiger."""
     data = await _request("GET", "/search", COST_SEARCH, params={
         "part": "snippet",
         "q": query,
         "type": "video",
-        "videoCategoryId": "10",   # Music
         "maxResults": max_results,
     })
     out = []

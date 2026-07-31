@@ -192,29 +192,76 @@ async def _sync_one(job, job_id, item, remove_extras, min_confidence, ignore_unc
     job["quota_used_today"] = db.quota_used_today()
 
 
-async def _resolve_video(track: dict, min_confidence: float):
-    """Liefert (video_id|None, confidence, source, certain).
-    source: 'cache'|'search'  certain: True wenn sicherer Treffer."""
-    cached = db.get_cached_match(track["id"])
-    if cached:
-        if cached["status"] == "ok":
-            return cached["youtube_video_id"], cached["confidence"], "cache", True
-        # 'uncertain' -> nicht erneut suchen, keine Quota
-        return None, cached["confidence"], "cache", False
-
+async def _search_and_save(track: dict, min_confidence: float):
+    """Sucht IMMER frisch bei YouTube (ignoriert Cache), bewertet die Kandidaten
+    und speichert das Ergebnis samt aktueller Matching-Algorithmus-Version.
+    Liefert (video_id|None, confidence, certain)."""
     title = f'{track["artist"]} – {track["name"]}'
     query = matching.build_query(track["name"], track["artist"])
     candidates = await youtube.search_videos(query)
     if not candidates:
-        db.save_match(track["id"], "", title, 0.0, status="uncertain")
-        return None, 0.0, "search", False
+        db.save_match(track["id"], "", title, 0.0, status="uncertain", algo_version=matching.ALGO_VERSION)
+        return None, 0.0, False
 
     durations = await youtube.videos_details([c["video_id"] for c in candidates])
     best = matching.pick_best(track, candidates, durations)
     if best and best["confidence"] >= min_confidence:
-        db.save_match(track["id"], best["video_id"], title, best["confidence"], status="ok")
-        return best["video_id"], best["confidence"], "search", True
+        db.save_match(track["id"], best["video_id"], title, best["confidence"],
+                      status="ok", algo_version=matching.ALGO_VERSION)
+        return best["video_id"], best["confidence"], True
     # bester Kandidat zu unsicher -> als 'uncertain' merken (mit bestem Kandidaten zur Info)
     db.save_match(track["id"], best["video_id"] if best else "", title,
-                  best["confidence"] if best else 0.0, status="uncertain")
-    return None, (best["confidence"] if best else 0.0), "search", False
+                  best["confidence"] if best else 0.0, status="uncertain", algo_version=matching.ALGO_VERSION)
+    return None, (best["confidence"] if best else 0.0), False
+
+
+async def _resolve_video(track: dict, min_confidence: float):
+    """Liefert (video_id|None, confidence, source, certain).
+    source: 'cache'|'search'  certain: True wenn sicherer Treffer.
+
+    Ein zwischengespeicherter Treffer (egal ob zuletzt 'ok' oder 'uncertain')
+    wird bei JEDEM Lauf ohne neue YouTube-Suche gegen die aktuell eingestellte
+    Mindest-Trefferqualitaet neu bewertet - kostenlos, da die Trefferqualitaet
+    schon bekannt ist:
+     - Regler hochgezogen -> vormals akzeptierte Treffer koennen rueckwirkend
+       als unsicher gelten und werden (bei aktivem "Extra-Videos entfernen")
+       aus der YouTube-Playlist entfernt.
+     - Regler runtergezogen -> vormals als unsicher zurueckgestellte Treffer
+       koennen die neue, niedrigere Schwelle jetzt erfuellen und werden ohne
+       neue Suche sofort akzeptiert.
+    Weicht die neu bewertete Einstufung vom gespeicherten Status ab, wird das
+    in der DB nachgezogen (u.a. damit die "Fehlende Lieder"-Seite konsistent
+    bleibt und nicht laenger einen Song zeigt, der gerade doch akzeptiert wurde).
+
+    Nur wenn auch nach dieser Neubewertung kein Kandidat die Schwelle erreicht,
+    wird tatsaechlich neu bei YouTube gesucht - und zwar automatisch, sobald
+    sich die Matching-Logik seitdem geaendert hat (algo_version veraltet), ohne
+    dass man manuell "Unsichere neu suchen lassen" klicken muss."""
+    cached = db.get_cached_match(track["id"])
+    if cached:
+        stored_conf = cached["confidence"] or 0.0
+        certain = bool(cached["youtube_video_id"]) and stored_conf >= min_confidence
+        new_status = "ok" if certain else "uncertain"
+        if new_status != cached["status"]:
+            db.save_match(track["id"], cached["youtube_video_id"] or "", cached["title"] or "",
+                          stored_conf, status=new_status, algo_version=cached["algo_version"] or 0)
+        if certain:
+            return cached["youtube_video_id"], stored_conf, "cache", True
+        if (cached["algo_version"] or 0) >= matching.ALGO_VERSION:
+            # weiterhin unsicher und mit aktueller Logik gesucht -> keine neue Suche, keine Quota
+            return None, stored_conf, "cache", False
+
+    vid, conf, certain = await _search_and_save(track, min_confidence)
+    return vid, conf, "search", certain
+
+
+async def recheck_track(spotify_track_id: str, min_confidence: float) -> dict:
+    """Sucht einen einzelnen Track gezielt neu (z.B. von der 'Fehlende Lieder'-Seite
+    ausgeloest, nachdem sich die Matching-Logik verbessert hat) - ignoriert den
+    Cache bewusst, damit sich Algorithmus-Verbesserungen sofort auswirken."""
+    track = await spotify.get_track(spotify_track_id)
+    vid, conf, certain = await _search_and_save(track, min_confidence)
+    return {
+        "track": track["name"], "artist": track["artist"],
+        "confidence": round(conf, 3), "video_id": vid, "certain": certain,
+    }
