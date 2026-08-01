@@ -214,19 +214,24 @@ async def _search_and_save(track: dict, min_confidence: float, use_ai: bool = Fa
                       status="ok", algo_version=matching.ALGO_VERSION)
         return best["video_id"], best["confidence"], True
 
+    ai_checked = False
     if use_ai:
         idx = await llm.rerank(track, candidates, durations)
+        ai_checked = True  # KI hatte fuer DIESE Kandidatenliste ihre Chance, egal ob Treffer oder nicht
         if idx is not None:
             chosen = candidates[idx]
             conf = max(best["confidence"] if best else 0.0, llm.LLM_CONFIRMED_CONFIDENCE)
             db.save_match(track["id"], chosen["video_id"], title, conf,
-                          status="ok", algo_version=matching.ALGO_VERSION)
+                          status="ok", algo_version=matching.ALGO_VERSION, ai_checked=True)
             return chosen["video_id"], conf, True
 
     # bester Kandidat zu unsicher (auch nach KI-Pruefung, falls aktiv) -> als
-    # 'uncertain' merken (mit bestem heuristischen Kandidaten zur Info)
+    # 'uncertain' merken (mit bestem heuristischen Kandidaten zur Info). ai_checked
+    # nur dann True, wenn die KI diese Kandidaten tatsaechlich gesehen hat - sonst
+    # bekommt sie beim naechsten Mal (falls dann aktiviert) noch eine echte Chance.
     db.save_match(track["id"], best["video_id"] if best else "", title,
-                  best["confidence"] if best else 0.0, status="uncertain", algo_version=matching.ALGO_VERSION)
+                  best["confidence"] if best else 0.0, status="uncertain",
+                  algo_version=matching.ALGO_VERSION, ai_checked=ai_checked)
     return None, (best["confidence"] if best else 0.0), False
 
 
@@ -250,8 +255,13 @@ async def _resolve_video(track: dict, min_confidence: float, use_ai: bool = Fals
 
     Nur wenn auch nach dieser Neubewertung kein Kandidat die Schwelle erreicht,
     wird tatsaechlich neu bei YouTube gesucht - und zwar automatisch, sobald
-    sich die Matching-Logik seitdem geaendert hat (algo_version veraltet), ohne
-    dass man manuell "Unsichere neu suchen lassen" klicken muss."""
+    sich die Matching-Logik seitdem geaendert hat (algo_version veraltet) ODER
+    die KI aktiv ist, diesen Treffer aber noch nie gesehen hat (z.B. weil man
+    gerade erst den Regler hochgezogen hat und der Song dadurch neu unsicher
+    wurde) - ohne dass man manuell "Unsichere neu suchen lassen" klicken muss.
+    Die kostenlose Neubewertung oben kann der KI keine Kandidatenliste liefern
+    (die wird nicht dauerhaft gespeichert), deshalb braucht sie dafuer eine
+    echte neue Suche."""
     cached = db.get_cached_match(track["id"])
     if cached:
         stored_conf = cached["confidence"] or 0.0
@@ -259,11 +269,15 @@ async def _resolve_video(track: dict, min_confidence: float, use_ai: bool = Fals
         new_status = "ok" if certain else "uncertain"
         if new_status != cached["status"]:
             db.save_match(track["id"], cached["youtube_video_id"] or "", cached["title"] or "",
-                          stored_conf, status=new_status, algo_version=cached["algo_version"] or 0)
+                          stored_conf, status=new_status, algo_version=cached["algo_version"] or 0,
+                          ai_checked=bool(cached["ai_checked"]))
         if certain:
             return cached["youtube_video_id"], stored_conf, "cache", True
-        if (cached["algo_version"] or 0) >= matching.ALGO_VERSION:
-            # weiterhin unsicher und mit aktueller Logik gesucht -> keine neue Suche, keine Quota
+        algo_current = (cached["algo_version"] or 0) >= matching.ALGO_VERSION
+        ai_satisfied = (not use_ai) or bool(cached["ai_checked"])
+        if algo_current and ai_satisfied:
+            # weiterhin unsicher, Logik aktuell, KI hat diese Kandidaten schon gesehen
+            # (oder ist aus) -> keine neue Suche, keine Quota
             return None, stored_conf, "cache", False
 
     vid, conf, certain = await _search_and_save(track, min_confidence, use_ai)

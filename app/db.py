@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS track_map (
     confidence       REAL,
     status           TEXT DEFAULT 'ok',   -- 'ok' = sicherer Treffer, 'uncertain' = gesucht, kein sicherer Treffer
     matched_at       INTEGER,
-    algo_version     INTEGER DEFAULT 0    -- Version der Matching-Logik beim letzten Suchen
+    algo_version     INTEGER DEFAULT 0,   -- Version der Matching-Logik beim letzten Suchen
+    ai_checked       INTEGER DEFAULT 0    -- 1 = KI hat diesen Treffer bei der letzten Suche bereits geprueft
 );
 
 CREATE TABLE IF NOT EXISTS playlist_map (
@@ -56,6 +57,8 @@ def init() -> None:
             con.execute("ALTER TABLE track_map ADD COLUMN status TEXT DEFAULT 'ok'")
         if "algo_version" not in cols:
             con.execute("ALTER TABLE track_map ADD COLUMN algo_version INTEGER DEFAULT 0")
+        if "ai_checked" not in cols:
+            con.execute("ALTER TABLE track_map ADD COLUMN ai_checked INTEGER DEFAULT 0")
 
 
 # ---------- Tokens ----------
@@ -98,15 +101,17 @@ def get_cached_match(spotify_track_id: str) -> sqlite3.Row | None:
 
 
 def save_match(spotify_track_id: str, youtube_video_id: str, title: str,
-               confidence: float, status: str = "ok", algo_version: int = 0) -> None:
+               confidence: float, status: str = "ok", algo_version: int = 0,
+               ai_checked: bool = False) -> None:
     with _conn() as con:
         con.execute(
-            "INSERT INTO track_map(spotify_track_id, youtube_video_id, title, confidence, status, matched_at, algo_version) "
-            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(spotify_track_id) DO UPDATE SET "
+            "INSERT INTO track_map(spotify_track_id, youtube_video_id, title, confidence, status, matched_at, algo_version, ai_checked) "
+            "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(spotify_track_id) DO UPDATE SET "
             "youtube_video_id=excluded.youtube_video_id, title=excluded.title, "
             "confidence=excluded.confidence, status=excluded.status, matched_at=excluded.matched_at, "
-            "algo_version=excluded.algo_version",
-            (spotify_track_id, youtube_video_id, title, confidence, status, int(time.time()), algo_version),
+            "algo_version=excluded.algo_version, ai_checked=excluded.ai_checked",
+            (spotify_track_id, youtube_video_id, title, confidence, status, int(time.time()),
+             algo_version, int(ai_checked)),
         )
 
 
