@@ -6,7 +6,7 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import RedirectResponse, FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, spotify, youtube, sync
+from . import config, db, spotify, youtube, sync, llm
 
 app = FastAPI(title="Spotify → YouTube Sync")
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -105,11 +105,36 @@ async def start_sync(req: Request, bg: BackgroundTasks):
         raise HTTPException(400, "Keine Playlist ausgewaehlt.")
     remove_extras = bool(body.get("remove_extras", True))
     min_conf = float(body.get("min_confidence", 0.55))
-    ignore_uncertain = bool(body.get("ignore_uncertain", False))
+    use_ai = bool(body.get("use_ai", False)) and llm.model_ready()
 
     job_id = sync.new_job(playlists)
-    bg.add_task(sync.run_sync, job_id, remove_extras, min_conf, ignore_uncertain)
+    bg.add_task(sync.run_sync, job_id, remove_extras, min_conf, use_ai)
     return {"job_id": job_id}
+
+
+@app.get("/api/ai-status")
+def ai_status():
+    """Ob die optionale lokale KI-Unterstuetzung genutzt werden kann: Pakete
+    installiert (llama-cpp-python) und Modell bereits heruntergeladen."""
+    return {"configured": llm.is_configured(), "model_ready": llm.model_ready()}
+
+
+@app.post("/api/ai-download")
+def ai_download(bg: BackgroundTasks):
+    """Startet den Modell-Download im Hintergrund (nicht blockierend) - Fortschritt
+    laesst sich ueber /api/ai-download-status abfragen (echter Fortschrittsbalken
+    in der UI statt nur "laedt...")."""
+    if not llm.is_configured():
+        raise HTTPException(400, "llama-cpp-python ist nicht installiert - siehe requirements.txt.")
+    if llm.model_ready():
+        return {"ok": True, "already_ready": True}
+    bg.add_task(llm.download_model)
+    return {"ok": True, "started": True}
+
+
+@app.get("/api/ai-download-status")
+def ai_download_status():
+    return llm.download_status()
 
 
 @app.post("/api/reset-uncertain")
@@ -161,8 +186,9 @@ async def recheck_track(req: Request):
     if not spotify_track_id:
         raise HTTPException(400, "spotify_track_id fehlt.")
     min_conf = float(body.get("min_confidence", 0.55))
+    use_ai = bool(body.get("use_ai", False)) and llm.model_ready()
     try:
-        result = await sync.recheck_track(spotify_track_id, min_conf)
+        result = await sync.recheck_track(spotify_track_id, min_conf, use_ai)
     except youtube.QuotaExceeded as e:
         raise HTTPException(429, str(e))
     except youtube.YouTubeApiError as e:

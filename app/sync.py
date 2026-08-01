@@ -1,7 +1,7 @@
 """Sync-Orchestrierung pro Playlist + In-Memory-Job-Tracking + Abbrechen."""
 import uuid
 
-from . import config, db, spotify, youtube, matching
+from . import config, db, spotify, youtube, matching, llm
 
 # In-Memory-Jobs (Single-User-Betrieb)
 JOBS: dict[str, dict] = {}
@@ -23,7 +23,7 @@ def new_job(playlists: list[dict]) -> str:
         "queue": [
             {"spotify_id": p["id"], "name": p.get("name") or p["id"],
              "status": "queued", "added": 0, "removed": 0,
-             "cached": 0, "searched": 0, "review": 0, "ignored": 0, "error": None}
+             "cached": 0, "searched": 0, "review": 0, "error": None}
             for p in playlists
         ],
     }
@@ -58,7 +58,7 @@ def _friendly_message(e: Exception) -> str:
 
 
 async def run_sync(job_id: str, remove_extras: bool, min_confidence: float,
-                   ignore_uncertain: bool = False) -> None:
+                   use_ai: bool = False) -> None:
     job = JOBS[job_id]
     try:
         for item in job["queue"]:
@@ -71,7 +71,7 @@ async def run_sync(job_id: str, remove_extras: bool, min_confidence: float,
                 _log(job, f"⏹ „{item['name']}“ übersprungen (abgebrochen).")
                 continue
             try:
-                await _sync_one(job, job_id, item, remove_extras, min_confidence, ignore_uncertain)
+                await _sync_one(job, job_id, item, remove_extras, min_confidence, use_ai)
             except youtube.QuotaExceeded:
                 # Tageskontingent betrifft den ganzen Job, nicht nur diese Playlist -> abbrechen.
                 raise
@@ -116,7 +116,7 @@ async def run_sync(job_id: str, remove_extras: bool, min_confidence: float,
         job["quota_used_today"] = db.quota_used_today()
 
 
-async def _sync_one(job, job_id, item, remove_extras, min_confidence, ignore_uncertain) -> None:
+async def _sync_one(job, job_id, item, remove_extras, min_confidence, use_ai=False) -> None:
     spid = item["spotify_id"]
     item["status"] = "running"
     name = await spotify.get_playlist_name(spid)
@@ -143,15 +143,13 @@ async def _sync_one(job, job_id, item, remove_extras, min_confidence, ignore_unc
             _log(job, f"  ⏹ „{name}“ während des Matchings abgebrochen.")
             job["quota_used_today"] = db.quota_used_today()
             return
-        vid, conf, source, certain = await _resolve_video(tr, min_confidence)
+        vid, conf, source, certain = await _resolve_video(tr, min_confidence, use_ai)
         if source == "cache":
             item["cached"] += 1
         elif source == "search":
             item["searched"] += 1
         if certain and vid:
             desired_video_ids.append(vid)
-        elif ignore_uncertain:
-            item["ignored"] += 1
         else:
             item["review"] += 1
             job["needs_review"].append({
@@ -188,14 +186,20 @@ async def _sync_one(job, job_id, item, remove_extras, min_confidence, ignore_unc
         item["status"] = "done"
     _log(job, f"  ✓ „{name}“: +{item['added']} / -{item['removed']}, "
               f"{item['cached']} Cache, {item['searched']} gesucht, "
-              f"{item['review']} zur Prüfung, {item['ignored']} ignoriert.")
+              f"{item['review']} zur Prüfung.")
     job["quota_used_today"] = db.quota_used_today()
 
 
-async def _search_and_save(track: dict, min_confidence: float):
+async def _search_and_save(track: dict, min_confidence: float, use_ai: bool = False):
     """Sucht IMMER frisch bei YouTube (ignoriert Cache), bewertet die Kandidaten
     und speichert das Ergebnis samt aktueller Matching-Algorithmus-Version.
-    Liefert (video_id|None, confidence, certain)."""
+    Liefert (video_id|None, confidence, certain).
+
+    Ist die Heuristik unsicher UND use_ai aktiv, wird zusaetzlich ein lokales KI-
+    Modell (siehe llm.py) mit genau denselben, bereits abgerufenen Kandidaten als
+    Tie-Breaker gefragt - keine zusaetzliche YouTube-Anfrage/Quota noetig. Die KI
+    ist rein additiv: liefert sie kein Ergebnis (nicht installiert, Modell fehlt,
+    unsicher), bleibt es beim heuristischen 'uncertain' wie ohne KI."""
     title = f'{track["artist"]} – {track["name"]}'
     query = matching.build_query(track["name"], track["artist"])
     candidates = await youtube.search_videos(query)
@@ -209,13 +213,24 @@ async def _search_and_save(track: dict, min_confidence: float):
         db.save_match(track["id"], best["video_id"], title, best["confidence"],
                       status="ok", algo_version=matching.ALGO_VERSION)
         return best["video_id"], best["confidence"], True
-    # bester Kandidat zu unsicher -> als 'uncertain' merken (mit bestem Kandidaten zur Info)
+
+    if use_ai:
+        idx = await llm.rerank(track, candidates, durations)
+        if idx is not None:
+            chosen = candidates[idx]
+            conf = max(best["confidence"] if best else 0.0, llm.LLM_CONFIRMED_CONFIDENCE)
+            db.save_match(track["id"], chosen["video_id"], title, conf,
+                          status="ok", algo_version=matching.ALGO_VERSION)
+            return chosen["video_id"], conf, True
+
+    # bester Kandidat zu unsicher (auch nach KI-Pruefung, falls aktiv) -> als
+    # 'uncertain' merken (mit bestem heuristischen Kandidaten zur Info)
     db.save_match(track["id"], best["video_id"] if best else "", title,
                   best["confidence"] if best else 0.0, status="uncertain", algo_version=matching.ALGO_VERSION)
     return None, (best["confidence"] if best else 0.0), False
 
 
-async def _resolve_video(track: dict, min_confidence: float):
+async def _resolve_video(track: dict, min_confidence: float, use_ai: bool = False):
     """Liefert (video_id|None, confidence, source, certain).
     source: 'cache'|'search'  certain: True wenn sicherer Treffer.
 
@@ -251,16 +266,16 @@ async def _resolve_video(track: dict, min_confidence: float):
             # weiterhin unsicher und mit aktueller Logik gesucht -> keine neue Suche, keine Quota
             return None, stored_conf, "cache", False
 
-    vid, conf, certain = await _search_and_save(track, min_confidence)
+    vid, conf, certain = await _search_and_save(track, min_confidence, use_ai)
     return vid, conf, "search", certain
 
 
-async def recheck_track(spotify_track_id: str, min_confidence: float) -> dict:
+async def recheck_track(spotify_track_id: str, min_confidence: float, use_ai: bool = False) -> dict:
     """Sucht einen einzelnen Track gezielt neu (z.B. von der 'Fehlende Lieder'-Seite
     ausgeloest, nachdem sich die Matching-Logik verbessert hat) - ignoriert den
     Cache bewusst, damit sich Algorithmus-Verbesserungen sofort auswirken."""
     track = await spotify.get_track(spotify_track_id)
-    vid, conf, certain = await _search_and_save(track, min_confidence)
+    vid, conf, certain = await _search_and_save(track, min_confidence, use_ai)
     return {
         "track": track["name"], "artist": track["artist"],
         "confidence": round(conf, 3), "video_id": vid, "certain": certain,

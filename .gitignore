@@ -18,6 +18,9 @@ venv/
 env/
 ENV/
 
+# ---- Lokales KI-Modell (GGUF, wird bei Bedarf automatisch heruntergeladen) ----
+models/
+
 # ---- Python-Artefakte ----
 __pycache__/
 *.py[cod]

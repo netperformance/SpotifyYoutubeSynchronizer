@@ -28,3 +28,8 @@ YOUTUBE_SCOPES = "https://www.googleapis.com/auth/youtube"
 # Marker, der in die YouTube-Playlist-Beschreibung geschrieben wird,
 # damit die Zuordnung Spotify-Playlist -> YT-Playlist wiederfindbar ist.
 SYNC_MARKER = "[sync:spotify:{spotify_id}]"
+
+# Lokales KI-Modell (optional) fuer die Neubewertung unsicherer Treffer.
+LLM_REPO_ID = _req("LLM_REPO_ID") or "bartowski/Qwen_Qwen3-1.7B-GGUF"
+LLM_FILENAME = _req("LLM_FILENAME") or "Qwen_Qwen3-1.7B-Q4_K_M.gguf"
+LLM_MODELS_DIR = _req("LLM_MODELS_DIR") or "models"

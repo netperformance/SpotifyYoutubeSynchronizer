@@ -53,6 +53,11 @@ nav.tabs a { color:var(--mut); text-decoration:none; padding:7px 14px; border-ra
              border:1px solid var(--line); font-weight:600; font-size:14px; }
 nav.tabs a.active { color:var(--tx); background:var(--card); border-color:var(--ac); }
 
+/* Fortschrittsbalken (z.B. KI-Modell-Download) */
+.progress-bar { flex:1; max-width:320px; height:10px; background:var(--line);
+                border-radius:99px; overflow:hidden; }
+.progress-fill { height:100%; width:0%; background:var(--ac); transition:width .25s ease; }
+
 /* Fehlende-Lieder-Seite */
 .pl-group { margin-bottom:16px; }
 .pl-group h3 { margin:0 0 8px; font-size:16px; }

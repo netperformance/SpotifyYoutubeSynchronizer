@@ -35,12 +35,24 @@
     </div>
 
     <div class="opts">
-      <label><input type="checkbox" id="remove" checked> Extra-Videos auf YouTube entfernen (exakte Spiegelung)</label>
-      <label><input type="checkbox" id="ignore-uncertain" onchange="ignoreUncertainChanged()"> Unsicher erkannte Lieder ignorieren</label>
       <label>Mindest-Trefferqualität: <span id="conf-val">55%</span>
         <input type="range" id="conf" min="0.3" max="0.9" step="0.05" value="0.55" oninput="confVal()">
       </label>
-      <button class="ghost mini" onclick="resetUncertain()">Unsichere neu suchen lassen</button>
+    </div>
+
+    <div class="opts">
+      <label title="Lokales KI-Modell prüft unsichere Treffer zusätzlich zur normalen Erkennung. Läuft komplett offline auf diesem Rechner, dauert aber ca. 10-20 Sekunden pro unsicherem Song.">
+        <input type="checkbox" id="use-ai" onchange="useAiChanged()"> KI-Unterstützung für unsichere Treffer nutzen
+      </label>
+      <span class="muted" id="ai-hint"></span>
+    </div>
+    <div class="row" id="ai-progress-row" style="display:none; margin:-4px 0 12px">
+      <div class="progress-bar"><div class="progress-fill" id="ai-progress-fill"></div></div>
+      <span class="muted" id="ai-progress-text"></span>
+    </div>
+
+    <div class="opts">
+      <label><input type="checkbox" id="remove" checked> Extra-Videos auf YouTube entfernen (exakte Spiegelung)</label>
     </div>
 
     <div class="row" style="margin-bottom:6px">
@@ -139,8 +151,84 @@ function confVal() {
   document.getElementById('conf-val').textContent = Math.round(v * 100) + '%';
   saveSettings({ minConfidence: v });
 }
-function ignoreUncertainChanged() {
-  saveSettings({ ignoreUncertain: document.getElementById('ignore-uncertain').checked });
+function useAiChanged() {
+  saveSettings({ useAi: document.getElementById('use-ai').checked });
+}
+
+async function checkAiStatus() {
+  const checkbox = document.getElementById('use-ai');
+  const hint = document.getElementById('ai-hint');
+  try {
+    const s = await (await fetch('/api/ai-status')).json();
+    if (!s.configured) {
+      checkbox.disabled = true;
+      hint.textContent = '(nicht installiert – siehe requirements.txt)';
+    } else if (!s.model_ready) {
+      checkbox.disabled = true;
+      hint.innerHTML = '(Modell noch nicht heruntergeladen – ' +
+        '<a class="link" href="#" onclick="downloadAiModel(); return false;">jetzt herunterladen, ~1,3 GB</a>)';
+    } else {
+      checkbox.disabled = false;
+      hint.textContent = '✓ Modell bereit';
+    }
+  } catch {
+    checkbox.disabled = true;
+    hint.textContent = '(Status konnte nicht geprüft werden)';
+  }
+}
+
+function formatMB(bytes) {
+  return (bytes / 1e6).toFixed(0) + ' MB';
+}
+
+async function downloadAiModel() {
+  const hint = document.getElementById('ai-hint');
+  const row = document.getElementById('ai-progress-row');
+  const fill = document.getElementById('ai-progress-fill');
+  const text = document.getElementById('ai-progress-text');
+  hint.textContent = '';
+  row.style.display = '';
+  fill.style.width = '0%';
+  text.textContent = 'Starte Download …';
+  try {
+    const r = await fetch('/api/ai-download', { method: 'POST' });
+    if (!r.ok) { row.style.display = 'none'; hint.textContent = 'Download fehlgeschlagen: ' + (await r.text()); return; }
+    pollAiDownload();
+  } catch (e) {
+    row.style.display = 'none';
+    hint.textContent = 'Download fehlgeschlagen: ' + e;
+  }
+}
+
+async function pollAiDownload() {
+  const row = document.getElementById('ai-progress-row');
+  const fill = document.getElementById('ai-progress-fill');
+  const text = document.getElementById('ai-progress-text');
+  try {
+    const s = await (await fetch('/api/ai-download-status')).json();
+    if (s.status === 'downloading') {
+      const pct = s.total ? Math.round(s.downloaded / s.total * 100) : 0;
+      fill.style.width = pct + '%';
+      text.textContent = s.total
+        ? `Lade herunter … ${pct}% (${formatMB(s.downloaded)} / ${formatMB(s.total)})`
+        : `Lade herunter … ${formatMB(s.downloaded)}`;
+      setTimeout(pollAiDownload, 800);
+    } else if (s.status === 'done') {
+      fill.style.width = '100%';
+      text.textContent = 'Fertig, Modell bereit.';
+      setTimeout(() => { row.style.display = 'none'; }, 1500);
+      await checkAiStatus();
+    } else if (s.status === 'error') {
+      row.style.display = 'none';
+      document.getElementById('ai-hint').innerHTML = 'Download fehlgeschlagen: ' + escapeHtml(s.error || '') +
+        ' – <a class="link" href="#" onclick="downloadAiModel(); return false;">erneut versuchen</a>';
+    } else {
+      row.style.display = 'none';
+    }
+  } catch (e) {
+    row.style.display = 'none';
+    document.getElementById('ai-hint').textContent = 'Status konnte nicht geprüft werden: ' + e;
+  }
 }
 
 let currentJob = null;
@@ -150,8 +238,8 @@ async function submitSync(selected) {
   if (!selected.length) return;
   const body = { playlists: selected,
                  remove_extras: document.getElementById('remove').checked,
-                 ignore_uncertain: document.getElementById('ignore-uncertain').checked,
-                 min_confidence: parseFloat(document.getElementById('conf').value) };
+                 min_confidence: parseFloat(document.getElementById('conf').value),
+                 use_ai: document.getElementById('use-ai').checked };
   const r = await fetch('/api/sync', { method:'POST', headers:{'Content-Type':'application/json'},
                                        body: JSON.stringify(body) });
   if (!r.ok) { alert('Sync-Start fehlgeschlagen: ' + (await r.text())); return; }
@@ -177,12 +265,6 @@ async function retryFailed() {
   const failed = lastQueue.filter(it => it.status === 'error')
     .map(it => ({ id: it.spotify_id, name: it.name }));
   submitSync(failed);
-}
-
-async function resetUncertain() {
-  const r = await fetch('/api/reset-uncertain', { method:'POST' });
-  const { cleared } = await r.json();
-  alert(`${cleared} als unsicher gemerkte Lieder zurückgesetzt. Sie werden beim nächsten Sync neu gesucht (kostet Quota).`);
 }
 
 async function cancelAll() {
@@ -239,7 +321,7 @@ async function poll(jobId) {
   for (const it of j.queue) {
     const [cls, label] = BADGE[it.status] || ['b-queued', it.status];
     const stats = (it.status === 'done' || it.status === 'cancelled')
-      ? `+${it.added} / -${it.removed} · ${it.review} zu prüfen${it.ignored ? ' · ' + it.ignored + ' ignoriert' : ''}`
+      ? `+${it.added} / -${it.removed} · ${it.review} zu prüfen`
       : (it.status === 'running' ? `${it.cached + it.searched} Tracks bearbeitet`
       : (it.status === 'error' ? (it.error || 'Fehler') : ''));
     const canCancel = running && (it.status === 'queued' || it.status === 'running');
@@ -274,9 +356,20 @@ function escapeHtml(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&l
 
 const initialSettings = loadSettings();
 if (typeof initialSettings.minConfidence === 'number') document.getElementById('conf').value = initialSettings.minConfidence;
-if (typeof initialSettings.ignoreUncertain === 'boolean') document.getElementById('ignore-uncertain').checked = initialSettings.ignoreUncertain;
+if (typeof initialSettings.useAi === 'boolean') document.getElementById('use-ai').checked = initialSettings.useAi;
 confVal();
 refreshStatus();
+checkAiStatus().then(async () => {
+  // Falls beim Neuladen der Seite bereits ein Download laeuft (z.B. Browser-Refresh
+  // waehrend des Herunterladens), Fortschrittsbalken sofort weiterlaufen lassen.
+  try {
+    const s = await (await fetch('/api/ai-download-status')).json();
+    if (s.status === 'downloading') {
+      document.getElementById('ai-progress-row').style.display = '';
+      pollAiDownload();
+    }
+  } catch {}
+});
 </script>
 </body>
 </html>

@@ -20,7 +20,13 @@
     <div class="row">
       <span class="muted" id="summary">Lade …</span>
       <span class="spacer"></span>
+      <button class="ghost mini" onclick="resetUncertain()">Alle unsicheren neu suchen lassen</button>
       <button class="ghost" onclick="load()">Aktualisieren</button>
+    </div>
+    <div class="muted" style="margin-top:8px; font-size:12px">
+      Löscht den gemerkten Zustand aller unten gelisteten Lieder. Sie verschwinden dadurch
+      erstmal aus dieser Liste, sind aber noch nicht neu gesucht – das passiert automatisch
+      beim nächsten Sync (kostet Quota).
     </div>
   </div>
 
@@ -79,11 +85,24 @@ async function load() {
   }
 }
 
+async function resetUncertain() {
+  if (!confirm('Alle als unsicher gemerkten Lieder zurücksetzen? Sie werden dadurch aus dieser Liste entfernt und erst beim nächsten Sync neu gesucht (kostet Quota).')) return;
+  const r = await fetch('/api/reset-uncertain', { method: 'POST' });
+  const { cleared } = await r.json();
+  await load();
+  alert(`${cleared} Lieder zurückgesetzt. Führe einen Sync aus, damit sie neu gesucht werden.`);
+}
+
+function syncSettings() {
+  try { return JSON.parse(localStorage.getItem('syncSettings')) || {}; }
+  catch { return {}; }
+}
 function minConfidence() {
-  try {
-    const s = JSON.parse(localStorage.getItem('syncSettings')) || {};
-    return typeof s.minConfidence === 'number' ? s.minConfidence : 0.55;
-  } catch { return 0.55; }
+  const v = syncSettings().minConfidence;
+  return typeof v === 'number' ? v : 0.55;
+}
+function useAi() {
+  return syncSettings().useAi === true;
 }
 
 function buildRow(m, heading) {
@@ -120,12 +139,13 @@ function buildRow(m, heading) {
   recheckBtn.title = 'Sucht diesen einen Song erneut bei YouTube (kostet etwas Quota)';
   recheckBtn.onclick = async () => {
     if (!m.spotify_track_id) return;
+    const withAi = useAi();
     recheckBtn.disabled = true;
-    recheckBtn.textContent = 'Prüfe …';
+    recheckBtn.textContent = withAi ? 'Prüfe … (KI, ~10-20s)' : 'Prüfe …';
     try {
       const r = await fetch('/api/recheck-track', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ spotify_track_id: m.spotify_track_id, min_confidence: minConfidence() }),
+        body: JSON.stringify({ spotify_track_id: m.spotify_track_id, min_confidence: minConfidence(), use_ai: withAi }),
       });
       if (!r.ok) { alert('Neu-Prüfung fehlgeschlagen: ' + (await r.text())); recheckBtn.disabled = false; recheckBtn.textContent = 'Neu prüfen'; return; }
       const res = await r.json();
