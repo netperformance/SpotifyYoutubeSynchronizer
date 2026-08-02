@@ -28,7 +28,7 @@ MIN_CONFIDENCE = 0.55             # darunter: manuelle Freigabe noetig
 # davon bewusst ausgenommen (sonst wuerde jede Aenderung die ganze Bibliothek neu
 # durchsuchen und massiv Quota verbrauchen); nur unerkannte Songs profitieren
 # automatisch von Verbesserungen.
-ALGO_VERSION = 3
+ALGO_VERSION = 4
 
 _NEG = ["cover", "remix", "live", "karaoke", "instrumental", "tribute",
         "sped up", "speed up", "slowed", "reverb", "8d audio", "nightcore",
@@ -56,6 +56,10 @@ _OFFICIAL_TITLE_MARKERS = [
 # japanischen Videotiteln: "（Official MV）", "【歌詞付き】", "「Live」" ...)
 _BRACKETS = re.compile(r"[\(\[（【「《][^\)\]）】」》]*[\)\]）】」》]")
 
+# Gerade vs. typografische Apostrophe/Akzente, die als Apostroph missbraucht
+# werden (z.B. "N'to", "Rock 'n' Roll", "O'Brien").
+_APOSTROPHES = "'’‘`´"
+
 
 def _norm(s: str, strip_brackets: bool = True) -> str:
     """Unicode-sichere Normalisierung fuer Vergleich/Substring-Suche.
@@ -72,6 +76,12 @@ def _norm(s: str, strip_brackets: bool = True) -> str:
     s = s.casefold()
     if strip_brackets:
         s = _BRACKETS.sub(" ", s)
+    # Apostrophe LOESCHEN statt durch Leerzeichen ersetzen: "N'to" soll zu "nto"
+    # werden (wie die Kuenstlerschreibweise "NTO"), nicht zu "n to" - sonst reisst
+    # ein Apostroph ein einzelnes Wort in zwei Tokens auseinander und Substring-/
+    # Wortvergleiche schlagen fehl, obwohl es derselbe Name ist.
+    for ch in _APOSTROPHES:
+        s = s.replace(ch, "")
     kept = [ch if unicodedata.category(ch)[0] in ("L", "N") else " " for ch in s]
     return re.sub(r"\s+", " ", "".join(kept)).strip()
 
@@ -97,6 +107,32 @@ def _contains(needle: str, haystack: str) -> bool:
 
 def build_query(track_name: str, artist: str) -> str:
     return f"{artist} {track_name}".strip()
+
+
+# Trennt eine anhaengende Versions-Angabe ab, z.B. "... - Radio Edit",
+# "... - Bachata Version", "... - Extended Mix". Spotify haengt solche
+# Zusaetze oft direkt (ohne Klammern) an den Titel an, aber viele YouTube-
+# Uploads nennen sie im Titel gar nicht, obwohl es dieselbe Originalaufnahme
+# ist - ein optionales Wort (z.B. das Genre) plus eines der Schluesselwoerter
+# am Textende.
+_VERSION_SUFFIX_RE = re.compile(r"\s+(?:\S+\s+)?(version|edit|mix|remaster(?:ed)?|remix)$")
+
+
+def _strip_version_suffix(name_n: str) -> tuple[str, str | None]:
+    m = _VERSION_SUFFIX_RE.search(name_n)
+    if not m:
+        return name_n, None
+    return name_n[: m.start()].strip(), m.group(0).strip()
+
+
+def _title_match_score(name_variants: list[str], nt: str, nt_full: str) -> float:
+    for name_n in name_variants:
+        if name_n and _contains(name_n, nt):
+            return 0.35
+    for name_n in name_variants:
+        if name_n and _token_overlap(name_n, nt_full) >= 0.6:
+            return 0.20
+    return 0.0
 
 
 _CLEAN_MARKERS = ["clean", "radio edit", "radio version"]
@@ -131,10 +167,15 @@ def score_candidate(track: dict, cand: dict, video_duration_s: int | None) -> fl
     # das den Titel auseinander (z.B. "Amiga Mía - Bachata Version" landet bei
     # "Amiga Mía - Artist X x Artist Y (Bachata Version) | Original-Artist" ohne
     # Klammerinhalt nur noch bei 2 von 4 Wort-Treffern statt 4 von 4).
-    if track_name_n and _contains(track_name_n, nt):
-        score += 0.35
-    elif track_name_n and _token_overlap(track_name_n, nt_full) >= 0.6:
-        score += 0.20
+    # Zusaetzlich ein zweiter Versuch mit abgetrennter Versions-Angabe (siehe
+    # _strip_version_suffix): Spotify haengt "- Radio Edit"/"- Bachata Version"
+    # oft OHNE Klammern an, aber viele YouTube-Titel nennen das gar nicht,
+    # obwohl es dieselbe Originalaufnahme ist.
+    core_name_n, version_qualifier = _strip_version_suffix(track_name_n)
+    name_variants = [track_name_n] if core_name_n == track_name_n else [track_name_n, core_name_n]
+    score += _title_match_score(name_variants, nt, nt_full)
+    if version_qualifier and version_qualifier in nt_full:
+        score += 0.05  # Versions-Angabe steht sogar woertlich im Kandidatentitel
 
     # Kuenstler (irgendeiner der Mitwirkenden) im Titel oder Kanal - beide
     # Seiten gleich normalisiert, sonst schlaegt der Vergleich bei
