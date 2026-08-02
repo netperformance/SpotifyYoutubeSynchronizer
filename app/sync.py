@@ -8,6 +8,12 @@ JOBS: dict[str, dict] = {}
 # Abbruch-Flags getrennt halten (Set ist nicht JSON-serialisierbar)
 CANCEL: dict[str, dict] = {}
 
+# Wie viele der heuristisch besten Kandidaten der KI vorgelegt werden (siehe
+# _search_and_save) - begrenzt die Promptgroesse, damit sie zuverlaessig zu
+# einer Antwort kommt, statt bei vielen Kandidaten mitten in der Bewertung das
+# Denk-Budget zu verbrauchen.
+AI_CANDIDATE_LIMIT = 5
+
 
 def new_job(playlists: list[dict]) -> str:
     """playlists: Liste von {'id':..., 'name':...} in gewuenschter Reihenfolge."""
@@ -208,7 +214,8 @@ async def _search_and_save(track: dict, min_confidence: float, use_ai: bool = Fa
         return None, 0.0, False
 
     durations = await youtube.videos_details([c["video_id"] for c in candidates])
-    best = matching.pick_best(track, candidates, durations)
+    ranked = matching.rank_candidates(track, candidates, durations)
+    best = ranked[0] if ranked else None
     if best and best["confidence"] >= min_confidence:
         db.save_match(track["id"], best["video_id"], title, best["confidence"],
                       status="ok", algo_version=matching.ALGO_VERSION)
@@ -216,10 +223,16 @@ async def _search_and_save(track: dict, min_confidence: float, use_ai: bool = Fa
 
     ai_checked = False
     if use_ai:
-        idx = await llm.rerank(track, candidates, durations)
+        # Nur die heuristisch besten Kandidaten vorlegen (nicht alle bis zu 12) -
+        # sonst reicht das Denk-Budget der KI nicht, um ueberhaupt zu einer
+        # Antwort zu kommen (bei vollen 12 Kandidaten bricht sie oft mitten in
+        # der Bewertung ab, ohne je eine Schlusszeile zu schreiben). Der richtige
+        # Kandidat liegt so gut wie immer unter den obersten Treffern.
+        shortlist = ranked[:AI_CANDIDATE_LIMIT]
+        idx = await llm.rerank(track, shortlist, durations)
         ai_checked = True  # KI hatte fuer DIESE Kandidatenliste ihre Chance, egal ob Treffer oder nicht
         if idx is not None:
-            chosen = candidates[idx]
+            chosen = shortlist[idx]
             conf = max(best["confidence"] if best else 0.0, llm.LLM_CONFIRMED_CONFIDENCE)
             db.save_match(track["id"], chosen["video_id"], title, conf,
                           status="ok", algo_version=matching.ALGO_VERSION, ai_checked=True)

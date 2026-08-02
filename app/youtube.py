@@ -1,5 +1,6 @@
 """YouTube-Client: Google-OAuth + Data API v3 (Suche, Playlists, Items) mit Quota-Zaehlung."""
 import asyncio
+import html
 import time
 import urllib.parse
 
@@ -204,8 +205,12 @@ async def search_videos(query: str, max_results: int = 12) -> list[dict]:
         vid = it.get("id", {}).get("videoId")
         sn = it.get("snippet", {})
         if vid:
-            out.append({"video_id": vid, "title": sn.get("title", ""),
-                        "channel": sn.get("channelTitle", "")})
+            # YouTube liefert Titel/Kanalnamen HTML-entity-kodiert (z.B. "Don&#39;t"
+            # statt "Don't") - unbedingt dekodieren, sonst zerstoert das exakte
+            # Wortvergleiche im Matching (Ziffern aus "&#39;" landen sonst mitten
+            # im normalisierten Text).
+            out.append({"video_id": vid, "title": html.unescape(sn.get("title", "")),
+                        "channel": html.unescape(sn.get("channelTitle", ""))})
     return out
 
 

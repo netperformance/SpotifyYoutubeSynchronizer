@@ -28,7 +28,7 @@ MIN_CONFIDENCE = 0.55             # darunter: manuelle Freigabe noetig
 # davon bewusst ausgenommen (sonst wuerde jede Aenderung die ganze Bibliothek neu
 # durchsuchen und massiv Quota verbrauchen); nur unerkannte Songs profitieren
 # automatisch von Verbesserungen.
-ALGO_VERSION = 2
+ALGO_VERSION = 3
 
 _NEG = ["cover", "remix", "live", "karaoke", "instrumental", "tribute",
         "sped up", "speed up", "slowed", "reverb", "8d audio", "nightcore",
@@ -155,10 +155,12 @@ def score_candidate(track: dict, cand: dict, video_duration_s: int | None) -> fl
         score += 0.30 if artist_in_channel else 0.12
     elif "vevo" in channel_raw or "official" in channel_raw:
         score += 0.22
-    elif any(nc == a for a in artists_n):
-        # Kanalname IST (normalisiert) exakt der Kuenstlername - sehr uebliches
-        # Muster bei unabhaengigen/kleinen Kuenstlern, die ihren Kanal einfach
-        # nach sich selbst benennen, ohne "VEVO"/"Official"/"Topic" im Namen.
+    elif any(nc == a or _fold_accents(nc) == _fold_accents(a) for a in artists_n):
+        # Kanalname IST (normalisiert, mit Akzent-Fallback) der Kuenstlername -
+        # sehr uebliches Muster bei unabhaengigen/kleinen Kuenstlern, die ihren
+        # Kanal einfach nach sich selbst benennen, ohne "VEVO"/"Official"/"Topic"
+        # im Namen. Akzent-Fallback noetig, da Kanalnamen Akzente oft weglassen
+        # (z.B. Kanal "Sidiki Diabate" vs. Kuenstler "Sidiki Diabaté").
         # Kein YouTube-verifiziertes Signal wie Topic/VEVO, aber ein starkes
         # Indiz fuer den eigenen Kanal des Kuenstlers.
         score += 0.20
@@ -205,12 +207,18 @@ def _token_overlap(a: str, b: str) -> float:
     return len(sa & sb) / len(sa)
 
 
-def pick_best(track: dict, candidates: list[dict], durations: dict[str, int]) -> dict | None:
-    """Bester Kandidat mit Score. None, wenn keine Kandidaten."""
-    best = None
+def rank_candidates(track: dict, candidates: list[dict], durations: dict[str, int]) -> list[dict]:
+    """Alle Kandidaten mit Score, absteigend sortiert."""
+    ranked = []
     for c in candidates:
         sc = score_candidate(track, c, durations.get(c["video_id"]))
-        if best is None or sc > best["confidence"]:
-            best = {"video_id": c["video_id"], "title": c["title"],
-                    "channel": c.get("channel", ""), "confidence": round(sc, 3)}
-    return best
+        ranked.append({"video_id": c["video_id"], "title": c["title"],
+                       "channel": c.get("channel", ""), "confidence": round(sc, 3)})
+    ranked.sort(key=lambda x: x["confidence"], reverse=True)
+    return ranked
+
+
+def pick_best(track: dict, candidates: list[dict], durations: dict[str, int]) -> dict | None:
+    """Bester Kandidat mit Score. None, wenn keine Kandidaten."""
+    ranked = rank_candidates(track, candidates, durations)
+    return ranked[0] if ranked else None

@@ -31,10 +31,14 @@ _lock = asyncio.Lock()
 # Erst ein GROSSZUEGIGES Denk-Budget liefert zuverlaessig korrekte UND
 # vollstaendige Antworten (getestet inkl. Faellen, in denen KEIN Kandidat passt -
 # das Modell schreibt dann "ANSWER: none" statt faelschlich einen zu waehlen).
-# Kostet ca. 10-20s pro Song auf einer normalen CPU - das ist der Preis fuer
+# Kostet ca. 15-30s pro Song auf einer normalen CPU - das ist der Preis fuer
 # Verlaesslichkeit bei diesem Modell; die KI ist bewusst optional (Checkbox) und
 # lohnt sich nur fuer Songs, die die Heuristik ohnehin nicht sicher einordnet.
-_MAX_TOKENS = 800
+# 800 war bei echten Kandidatenlisten (5 Kandidaten, ~150 Tokens Denktext je
+# Kandidat) zu knapp und brach regelmaessig vor der Antwortzeile ab -> 1200
+# gibt genug Spielraum fuer die volle Bewertung aller AI_CANDIDATE_LIMIT
+# Kandidaten (siehe sync.py) plus Fazit.
+_MAX_TOKENS = 1200
 _ANSWER_RE = re.compile(r"answer\s*:\s*(\d+|none)", re.IGNORECASE)
 
 _SYSTEM_PROMPT = """You match a Spotify track to the correct YouTube video from a list of \
