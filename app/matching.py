@@ -15,6 +15,7 @@ Arabisch, Hebraeisch, Chinesisch, Japanisch, Koreanisch, ...) - es werden nur
 Satzzeichen/Symbole entfernt, alle Buchstaben und Ziffern jeder Sprache bleiben
 erhalten.
 """
+import difflib
 import re
 import unicodedata
 
@@ -28,7 +29,7 @@ MIN_CONFIDENCE = 0.55             # darunter: manuelle Freigabe noetig
 # davon bewusst ausgenommen (sonst wuerde jede Aenderung die ganze Bibliothek neu
 # durchsuchen und massiv Quota verbrauchen); nur unerkannte Songs profitieren
 # automatisch von Verbesserungen.
-ALGO_VERSION = 4
+ALGO_VERSION = 5
 
 _NEG = ["cover", "remix", "live", "karaoke", "instrumental", "tribute",
         "sped up", "speed up", "slowed", "reverb", "8d audio", "nightcore",
@@ -132,6 +133,12 @@ def _title_match_score(name_variants: list[str], nt: str, nt_full: str) -> float
     for name_n in name_variants:
         if name_n and _token_overlap(name_n, nt_full) >= 0.6:
             return 0.20
+    # Letzter Fallback: unscharfer Wortvergleich fuer abweichende Transliterationen
+    # (z.B. Arabisch->Latein ohne einheitlichen Standard). Schwaecheres Signal als
+    # exakte Wortueberlappung, daher niedrigerer Bonus.
+    for name_n in name_variants:
+        if name_n and _fuzzy_token_overlap(name_n, nt_full) >= 0.6:
+            return 0.15
     return 0.0
 
 
@@ -246,6 +253,29 @@ def _token_overlap(a: str, b: str) -> float:
     if not sa:
         return 0.0
     return len(sa & sb) / len(sa)
+
+
+def _fuzzy_token_overlap(a: str, b: str) -> float:
+    """Wie _token_overlap, aber ein Wort aus a zaehlt auch als Treffer, wenn es
+    einem Wort aus b nur SEHR AEHNLICH ist (nicht exakt gleich). Wichtig fuer
+    Transliterationen aus nicht-lateinischen Schriften (v.a. Arabisch), wo es
+    keine einheitliche Umschrift gibt - z.B. "Qasayed" vs. "Qassayed" oder
+    "Kel" vs. "Kol" fuer denselben arabischen Titel. Nur Woerter ab 5 Zeichen
+    werden fuzzy verglichen (kuerzere Woerter haben zu haeufig hohe Aehnlichkeit
+    rein zufaellig, z.B. "cat"/"car" - das wuerde zu viele falsche Treffer geben)."""
+    wa, wb = a.split(), b.split()
+    sb = set(wb)
+    if not wa:
+        return 0.0
+    hits = 0
+    for w in wa:
+        if w in sb:
+            hits += 1
+        elif len(w) >= 5 and any(
+            len(x) >= 5 and difflib.SequenceMatcher(None, w, x).ratio() >= 0.75 for x in wb
+        ):
+            hits += 1
+    return hits / len(wa)
 
 
 def rank_candidates(track: dict, candidates: list[dict], durations: dict[str, int]) -> list[dict]:

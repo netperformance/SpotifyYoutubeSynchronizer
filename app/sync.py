@@ -1,4 +1,5 @@
 """Sync-Orchestrierung pro Playlist + In-Memory-Job-Tracking + Abbrechen."""
+import re
 import uuid
 
 from . import config, db, spotify, youtube, matching, llm
@@ -196,6 +197,26 @@ async def _sync_one(job, job_id, item, remove_extras, min_confidence, use_ai=Fal
     job["quota_used_today"] = db.quota_used_today()
 
 
+async def _search_with_fallback(track: dict) -> list[dict]:
+    """Sucht bei YouTube; liefert die Grundsuche 0 Treffer (z.B. weil Spotifys
+    eigene Metadaten einen Tippfehler enthalten oder ein zweisprachiger, durch
+    ":"/"|" getrennter Titel die Suche zu spezifisch macht), wird zusaetzlich
+    mit jedem einzelnen Titel-Segment erneut gesucht, bevor aufgegeben wird.
+    Kostet zusaetzliche Quota, aber nur in diesem seltenen Fall."""
+    query = matching.build_query(track["name"], track["artist"])
+    candidates = await youtube.search_videos(query)
+    if candidates:
+        return candidates
+    for part in re.split(r"[:|]", track["name"]):
+        part = part.strip()
+        if part and part != track["name"]:
+            fallback_query = matching.build_query(part, track["artist"])
+            candidates = await youtube.search_videos(fallback_query)
+            if candidates:
+                return candidates
+    return []
+
+
 async def _search_and_save(track: dict, min_confidence: float, use_ai: bool = False):
     """Sucht IMMER frisch bei YouTube (ignoriert Cache), bewertet die Kandidaten
     und speichert das Ergebnis samt aktueller Matching-Algorithmus-Version.
@@ -207,8 +228,7 @@ async def _search_and_save(track: dict, min_confidence: float, use_ai: bool = Fa
     ist rein additiv: liefert sie kein Ergebnis (nicht installiert, Modell fehlt,
     unsicher), bleibt es beim heuristischen 'uncertain' wie ohne KI."""
     title = f'{track["artist"]} – {track["name"]}'
-    query = matching.build_query(track["name"], track["artist"])
-    candidates = await youtube.search_videos(query)
+    candidates = await _search_with_fallback(track)
     if not candidates:
         db.save_match(track["id"], "", title, 0.0, status="uncertain", algo_version=matching.ALGO_VERSION)
         return None, 0.0, False
